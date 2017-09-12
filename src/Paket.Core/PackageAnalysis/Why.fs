@@ -39,18 +39,18 @@ module AdjLblGraph =
 let depGraph (res : PackageResolver.PackageResolution) : AdjLblGraph<_,_> =
     res
     |> Seq.toList
-    |> List.map (fun pair -> pair.Key, (pair.Value.Dependencies 
-                                       |> Set.map (fun (p,v,f) -> p,(v,f)) 
+    |> List.map (fun pair -> pair.Value, (pair.Value.Dependencies 
+                                       |> Set.map (fun (p,v,f) -> res.Item p,(v,f)) 
                                        |> Set.toList))
 
 type WhyOptions = 
     { Details : bool }
 
-type DependencyChain = LblPath<PackageName, (VersionRequirement * FrameworkRestrictions)>
+type DependencyChain = LblPath<PackageResolver.ResolvedPackage, (VersionRequirement * FrameworkRestrictions)>
 
 [<CompilationRepresentation(CompilationRepresentationFlags.ModuleSuffix)>]
 module DependencyChain =
-    let first ((name, _) : DependencyChain) = name
+    let first ((p, _) : DependencyChain) = p
 
     let rec length = function
     | (_, LblPathNode n) -> length n + 1
@@ -131,6 +131,7 @@ module Reason =
                 NuGetNotInGroup otherGroups
 
         let group = lockFile.GetGroup groupName
+        let package = group.Resolution.Item packageName
         if not <| group.Resolution.ContainsKey packageName then
             inferError () 
             |> List.singleton 
@@ -139,17 +140,18 @@ module Reason =
             let graph = depGraph group.Resolution
             let topLevelDeps = 
                 lockFile.GetTopLevelDependencies groupName
-                |> Seq.map (fun pair -> pair.Key)
+                |> Seq.map (fun pair -> pair.Value.Resolved)
                 |> Set.ofSeq
             let chains = 
                 topLevelDeps
                 |> Set.toList
-                |> List.collect (fun p -> AdjLblGraph.paths p packageName graph)
+                |> List.collect (fun p -> AdjLblGraph.paths p package graph)
             let version =
-                group.Resolution
-                |> Map.find packageName
-                |> fun x -> x.Version
-            match Set.contains packageName directDeps, Set.contains packageName topLevelDeps with
+                //group.Resolution
+                //|> Map.find packageName
+                //|> fun x -> x.Version
+                package.Version 
+            match Set.contains packageName directDeps, Set.contains package topLevelDeps with
             | true, true ->
                 Result.Ok ((TopLevel, version), [])
             | true, false ->
