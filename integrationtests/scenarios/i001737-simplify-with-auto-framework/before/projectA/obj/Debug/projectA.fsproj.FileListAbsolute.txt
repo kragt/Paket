@@ -1,0 +1,2 @@
+d:\Projects\Paket\integrationtests\scenarios\i001737-simplify-with-auto-framework\before\projectA\bin\Debug\projectA.dll
+d:\Projects\Paket\integrationtests\scenarios\i001737-simplify-with-auto-framework\before\projectA\obj\Debug\projectA.fsprojResolveAssemblyReference.cache
