@@ -37,7 +37,7 @@ let expectedWithoutSpecificVersion = """
       </Reference>
     </ItemGroup>
   </When>
-  <When Condition="$(TargetFrameworkIdentifier) == '.NETFramework' And ($(TargetFrameworkVersion) == 'v4.6.2' Or $(TargetFrameworkVersion) == 'v4.6.3' Or $(TargetFrameworkVersion) == 'v4.7' Or $(TargetFrameworkVersion) == 'v5.0')">
+  <When Condition="$(TargetFrameworkIdentifier) == '.NETFramework' And ($(TargetFrameworkVersion) == 'v4.6.2' Or $(TargetFrameworkVersion) == 'v4.6.3' Or $(TargetFrameworkVersion) == 'v4.7' Or $(TargetFrameworkVersion) == 'v4.7.1')">
     <ItemGroup>
       <Reference Include="ControlzEx">
         <HintPath>..\..\..\ControlzEx\lib\net462\ControlzEx.dll</HintPath>
@@ -87,7 +87,7 @@ let expectedWithSpecificVersionSetToTrue = """
       </Reference>
     </ItemGroup>
   </When>
-  <When Condition="$(TargetFrameworkIdentifier) == '.NETFramework' And ($(TargetFrameworkVersion) == 'v4.6.2' Or $(TargetFrameworkVersion) == 'v4.6.3' Or $(TargetFrameworkVersion) == 'v4.7' Or $(TargetFrameworkVersion) == 'v5.0')">
+  <When Condition="$(TargetFrameworkIdentifier) == '.NETFramework' And ($(TargetFrameworkVersion) == 'v4.6.2' Or $(TargetFrameworkVersion) == 'v4.6.3' Or $(TargetFrameworkVersion) == 'v4.7' Or $(TargetFrameworkVersion) == 'v4.7.1')">
     <ItemGroup>
       <Reference Include="ControlzEx">
         <HintPath>..\..\..\ControlzEx\lib\net462\ControlzEx.dll</HintPath>
@@ -139,7 +139,7 @@ let expectedWithSpecificVersionSetToFalse = """
       </Reference>
     </ItemGroup>
   </When>
-  <When Condition="$(TargetFrameworkIdentifier) == '.NETFramework' And ($(TargetFrameworkVersion) == 'v4.6.2' Or $(TargetFrameworkVersion) == 'v4.6.3' Or $(TargetFrameworkVersion) == 'v4.7' Or $(TargetFrameworkVersion) == 'v5.0')">
+  <When Condition="$(TargetFrameworkIdentifier) == '.NETFramework' And ($(TargetFrameworkVersion) == 'v4.6.2' Or $(TargetFrameworkVersion) == 'v4.6.3' Or $(TargetFrameworkVersion) == 'v4.7' Or $(TargetFrameworkVersion) == 'v4.7.1')">
     <ItemGroup>
       <Reference Include="ControlzEx">
         <HintPath>..\..\..\ControlzEx\lib\net462\ControlzEx.dll</HintPath>
@@ -161,7 +161,7 @@ let expectedWithSpecificVersionSetToFalse = """
 let ``should generate Xml without specific version for ControlzEx in CSharp project``() = 
     ensureDir()
     let model =
-        InstallModel.CreateFromLibs(PackageName "ControlzEx", SemVer.Parse "3.0.1", FrameworkRestriction.NoRestriction,
+        InstallModel.CreateFromLibs(PackageName "ControlzEx", SemVer.Parse "3.0.1", InstallModelKind.Package, FrameworkRestriction.NoRestriction,
             [ @"..\ControlzEx\lib\net40\ControlzEx.dll"
               @"..\ControlzEx\lib\net40\System.Windows.Interactivity.dll"
               @"..\ControlzEx\lib\net45\ControlzEx.dll"
@@ -187,7 +187,7 @@ let ``should generate Xml without specific version for ControlzEx in CSharp proj
 let ``should generate Xml with specific version set to true for ControlzEx in CSharp project``() = 
     ensureDir()
     let model =
-        InstallModel.CreateFromLibs(PackageName "ControlzEx", SemVer.Parse "3.0.1", FrameworkRestriction.NoRestriction,
+        InstallModel.CreateFromLibs(PackageName "ControlzEx", SemVer.Parse "3.0.1", InstallModelKind.Package, FrameworkRestriction.NoRestriction,
             [ @"..\ControlzEx\lib\net40\ControlzEx.dll"
               @"..\ControlzEx\lib\net40\System.Windows.Interactivity.dll"
               @"..\ControlzEx\lib\net45\ControlzEx.dll"
@@ -213,7 +213,7 @@ let ``should generate Xml with specific version set to true for ControlzEx in CS
 let ``should generate Xml with specific version set to false for ControlzEx in CSharp project``() = 
     ensureDir()
     let model =
-        InstallModel.CreateFromLibs(PackageName "ControlzEx", SemVer.Parse "3.0.1", FrameworkRestriction.NoRestriction,
+        InstallModel.CreateFromLibs(PackageName "ControlzEx", SemVer.Parse "3.0.1", InstallModelKind.Package, FrameworkRestriction.NoRestriction,
             [ @"..\ControlzEx\lib\net40\ControlzEx.dll"
               @"..\ControlzEx\lib\net40\System.Windows.Interactivity.dll"
               @"..\ControlzEx\lib\net45\ControlzEx.dll"

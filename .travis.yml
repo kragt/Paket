@@ -1,27 +1,39 @@
 language: csharp
+dist: trusty
+
+sudo: false
 
 env:
- - HOME=/home/travis APPDATA=/home/travis LocalAppData=/home/travis TRAVIS_STAGE=0 # DISABLE_NETCORE=true
- - HOME=/home/travis APPDATA=/home/travis LocalAppData=/home/travis TRAVIS_STAGE=1 # DISABLE_NETCORE=true
+  global:
+    - HOME=/home/travis
+    - APPDATA=/home/travis
+    - LocalAppData=/home/travis
+  matrix:
+    # run .net integration tests
+    - SkipIntegrationTestsNetCore=true PAKET_TESTSUITE_FLAKYTESTS=false
+    # run .net core integration tests
+    - SkipIntegrationTestsNet=true PAKET_TESTSUITE_FLAKYTESTS=false
+    # just flaky tests
+    - PAKET_TESTSUITE_FLAKYTESTS=true
 
-# dependencies (netcore)
-addons:
-  apt:
-    packages:
-       - libunwind8
-
-sudo: false  # use the new container-based Travis infrastructure
-#sudo: required
-dist: trusty # Ubuntu 14.04
+dotnet: 2.1.3
 
 mono:
-  - nightly
+  - 5.4.1
   - latest
-  - 5.2.0
+
+matrix:
+  allow_failures:
+    # travis failure to install mono (ref https://github.com/travis-ci/travis-ci/issues/9171)
+    - mono: latest
+    # flaky test are expected to fail from time to time
+    - env: PAKET_TESTSUITE_FLAKYTESTS=true
+    # sporadic MonoBtlsException: Ssl error:1000007d:SSL routines:OPENSSL_internal:CERTIFICATE_VERIFY_FAILED
+    - env: SkipIntegrationTestsNetCore=true PAKET_TESTSUITE_FLAKYTESTS=false
 
 branches:
   except:
     - gh-pages
 
-script: 
-  - ./build.sh RunIntegrationTests
+script:
+  - ./build.sh BuildPackage

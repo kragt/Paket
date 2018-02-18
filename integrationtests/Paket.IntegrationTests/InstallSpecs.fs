@@ -317,6 +317,8 @@ let ``#1467 install native package into vcxproj``() =
     let newLockFile = install "i001467-cpp-native"
     let newFile = Path.Combine(scenarioTempPath "i001467-cpp-native","MyClassLibrary","PaketTest.vcxproj")
     let oldFile = Path.Combine(originalScenarioPath "i001467-cpp-native","MyClassLibrary","PaketTest.vcxprojtemplate")
+    if updateBaselines then
+        File.Copy (newFile, oldFile, overwrite=true)
     let s1 = File.ReadAllText oldFile |> normalizeLineEndings
     let s2 = File.ReadAllText newFile |> normalizeLineEndings
     s2 |> shouldEqual s1
@@ -352,7 +354,7 @@ let ``#1458 should not install conflicting deps from different groups``() =
     with
     | exn when exn.Message.Contains "Package Nancy is referenced in different versions" -> ()
 
-[<Test>]
+[<Test;Flaky>]
 let ``#2335 should install deps from different groups when using conditions``() =
     let scenario = "i002335-razorengine"
     install scenario |> ignore
@@ -363,6 +365,9 @@ let ``#2335 should install deps from different groups when using conditions``() 
     let s1 = File.ReadAllText oldFile |> normalizeLineEndings
     let s2 = File.ReadAllText newFile |> normalizeLineEndings
     s2 |> shouldEqual s1
+
+    //lots of downloaded files => big disk size, better cleanup if test pass
+    System.IO.Directory.Delete(scenarioTempPath scenario, true)
 
 [<Test>]
 let ``#1442 should not warn on SonarLint``() =
@@ -500,6 +505,12 @@ let ``#1860 faulty condition was generated`` () =
     install scenario |> ignore
     let fsprojFile = (scenarioTempPath scenario) </> "Library1" </> "Library1.fsproj" |> File.ReadAllText
     Assert.IsFalse (fsprojFile.Contains(" And ()"))
+
+
+[<Test>]
+let ``#2777 should not conflict with locked packages``() =
+    let newLockFile = install "i002777"
+    newLockFile.Groups.[GroupName "main"].Resolution.ContainsKey (PackageName "FsPickler") |> shouldEqual true
 
 
 #if INTERACTIVE

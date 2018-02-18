@@ -57,9 +57,9 @@ let getNuGetV3Resource (source : NugetV3Source) (resourceType : NugetV3ResourceT
             let rawData =
                 match rawData with
                 | NotFound ->
-                    raise <| new Exception(sprintf "Could not load resources (404) from '%s'" source.Url)
+                    raise (new Exception(sprintf "Could not load resources (404) from '%s'" source.Url))
                 | UnknownError e ->
-                    raise <| new Exception(sprintf "Could not load resources from '%s'" source.Url, e.SourceException)
+                    raise (new Exception(sprintf "Could not load resources from '%s'" source.Url, e.SourceException))
                 | SuccessResponse x -> x
 
             let json = JsonConvert.DeserializeObject<NugetV3SourceRootJSON>(rawData)
@@ -312,13 +312,13 @@ type PackageIndex =
 let private getPackageIndexRaw (source : NugetV3Source) (packageName:PackageName) =
     async {
         let! registrationUrl = getNuGetV3Resource source PackageIndex
-        let url = registrationUrl.Replace("{id-lower}", packageName.ToString().ToLower()) // sprintf "%s%s/%s.json" registrationUrl (packageName.ToString().ToLower()) (version.Normalize())
+        let url = registrationUrl.Replace("{id-lower}", packageName.ToString().ToLower())
         let! rawData = safeGetFromUrl (source.Authentication |> Option.map toCredentials, url, acceptJson)
         return
             match rawData with
-            | NotFound -> None //raise <| System.Exception(sprintf "could not get registration data (404) from '%s'" url)
+            | NotFound -> None
             | UnknownError err ->
-                raise <| System.Exception(sprintf "could not get registration data from %s" url, err.SourceException)
+                raise (System.Exception(sprintf "could not get registration data from %s" url, err.SourceException))
             | SuccessResponse x -> Some (JsonConvert.DeserializeObject<PackageIndex>(x))
     }
 
@@ -332,9 +332,9 @@ let private getPackageIndexPageRaw (source:NugetV3Source) (url:string) =
         let! rawData = safeGetFromUrl (source.Authentication |> Option.map toCredentials, url, acceptJson)
         return
             match rawData with
-            | NotFound -> raise <| System.Exception(sprintf "could not get registration data (404) from '%s'" url)
+            | NotFound -> raise (System.Exception(sprintf "could not get registration data (404) from '%s'" url))
             | UnknownError err ->
-                raise <| System.Exception(sprintf "could not get registration data from %s" url, err.SourceException)
+                raise (System.Exception(sprintf "could not get registration data from %s" url, err.SourceException))
             | SuccessResponse x -> JsonConvert.DeserializeObject<PackageIndexPage>(x)
     }
 
@@ -367,7 +367,7 @@ let getRelevantPage (source:NugetV3Source) (index:PackageIndex) (version:SemVerI
                     |> Seq.toList
             match packages with
             | [ package ] -> return Some package
-            | [] -> return None 
+            | [] -> return None
             | h :: _ ->
                 // Can happen in theory when multiple versions differ only in casing...
                 traceWarnfn "Multiple package versions matched with '%O' on page '%s'" version page.Id
@@ -409,7 +409,7 @@ let getPackageDetails (source:NugetV3Source) (packageName:PackageName) (version:
         | None -> return EmptyResult
         | Some relevantPage ->
         let catalogData = relevantPage.PackageDetails
-        let dependencyGroups, dependencies = 
+        let dependencyGroups, dependencies =
             if catalogData.DependencyGroups = null then
                 [], []
             else
@@ -417,12 +417,13 @@ let getPackageDetails (source:NugetV3Source) (packageName:PackageName) (version:
                     match extractPlatforms false x with
                     | Some p -> p
                     | None ->
-                        Logging.traceErrorIfNotBefore ("Package", x, packageName, version) "Could not detect any platforms from '%s' in %O %O, please tell the package authors" x packageName version
+                        if not (x.StartsWith "_") then
+                            Logging.traceErrorIfNotBefore ("Package", x, packageName, version) "Could not detect any platforms from '%s' in %O %O, please tell the package authors" x packageName version
                         ParsedPlatformPath.Empty
                 catalogData.DependencyGroups |> Seq.map (fun group -> detect group.TargetFramework) |> Seq.toList,
 
                 catalogData.DependencyGroups
-                |> Seq.map(fun group -> 
+                |> Seq.map(fun group ->
                     if group.Dependencies = null then
                         Seq.empty
                     else
@@ -445,9 +446,10 @@ let getPackageDetails (source:NugetV3Source) (packageName:PackageName) (version:
         let optimized, warnings =
             addFrameworkRestrictionsToDependencies dependencies dependencyGroups
         for warning in warnings do
-            Logging.traceWarnfn "%s" (warning.Format packageName version)
+            let message = warning.Format packageName version
+            Logging.traceWarnIfNotBefore message "%s" message
 
-        return 
+        return
             { SerializedDependencies = []
               PackageName = packageName.ToString()
               SourceUrl = source.Url
@@ -462,8 +464,8 @@ let getPackageDetails (source:NugetV3Source) (packageName:PackageName) (version:
 
 let loadFromCacheOrGetDetails (force:bool)
                               (cacheFileName:string)
-                              (source:NugetV3Source) 
-                              (packageName:PackageName) 
+                              (source:NugetV3Source)
+                              (packageName:PackageName)
                               (version:SemVerInfo) =
     async {
         if not force && File.Exists cacheFileName then
@@ -476,9 +478,10 @@ let loadFromCacheOrGetDetails (force:bool)
                 else
                     return false,ODataSearchResult.Match cachedObject
             with exn ->
-                eprintfn "Possible Performance degration, could not retrieve '%O' from cache: %s" packageName exn.Message
-                if verbose then
-                    printfn "Error while retrieving data from cache: %O" exn
+                if verboseWarnings then
+                    traceWarnfn "Possible Performance degradation, could not retrieve '%O' from cache: %O" packageName exn
+                else
+                    traceWarnIfNotBefore ("NuGetV3 n/a", packageName, exn.Message) "Possible Performance degradation, could not retrieve '%O' from cache: %s" packageName exn.Message
                 let! details = getPackageDetails source packageName version
                 return true,details
         else

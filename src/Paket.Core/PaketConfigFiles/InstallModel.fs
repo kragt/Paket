@@ -56,7 +56,10 @@ type MsBuildFile = {
 module MsBuildFile =
     let ofFile (f:FrameworkDependentFile) =
         let fi = FileInfo(normalizePath f.File.FullPath)
-        let name = fi.Name.Replace(fi.Extension, "")
+        let name =
+            let ext = fi.Extension
+            if String.IsNullOrEmpty ext then fi.Name
+            else fi.Name.Replace(ext, "")
         { Name = name; Path = f.File.FullPath }
 
 type FrameworkReference = {
@@ -86,7 +89,7 @@ type FrameworkFolder<'T> = {
 } with
     member this.GetSinglePlatforms() =
         this.Targets
-        |> Seq.choose (function SinglePlatform t -> Some t | _ -> None)
+        |> Seq.choose (function TargetProfile.SinglePlatform t -> Some t | _ -> None)
 
 module FrameworkFolder =
     let map f (l:FrameworkFolder<_>) = {
@@ -130,7 +133,11 @@ type InstallModel = {
     TargetsFileFolders : FrameworkFolder<MsBuildFile Set> list
     Analyzers: AnalyzerLib list
     LicenseUrl: string option
+    Kind : InstallModelKind
 }
+and [<RequireQualifiedAccess>] InstallModelKind =
+    | Package
+    | DotnetCliTool
 
 module FolderScanner =
     // Stolen and modifed to our needs from http://www.fssnip.net/4I/title/sscanf-parsing-with-format-strings
@@ -246,7 +253,6 @@ module FolderScanner =
         else FSharpValue.MakeTuple(matches, typeof<'t>) :?> 't
 
     let trySscanf opts (pf:PrintfFormat<_,_,_,_,'t>) s : 't option =
-        //raise <| FormatException(sprintf "Unable to scan string '%s' with regex '%s'" s regexString)
         match sscanfHelper opts pf s with
         | ScanSuccess matches -> toGenericTuple matches |> Some
         | _ -> None
@@ -254,8 +260,8 @@ module FolderScanner =
     let inline private handleErrors s r =
         match r with
         | ScanSuccess matches -> toGenericTuple matches
-        | ScanRegexFailure (s, regexString) -> raise <| FormatException(sprintf "Unable to scan string '%s' with regex '%s'" s regexString)
-        | ScanParserFailure e -> raise <| FormatException(sprintf "Unable to parse string '%s' with parser: %s" s e)
+        | ScanRegexFailure (s, regexString) -> raise (FormatException(sprintf "Unable to scan string '%s' with regex '%s'" s regexString))
+        | ScanParserFailure e -> raise (FormatException(sprintf "Unable to parse string '%s' with parser: %s" s e))
 
     let sscanf opts (pf:PrintfFormat<_,_,_,_,'t>) s : 't =
         sscanfHelper opts pf s
@@ -313,7 +319,6 @@ module FolderScanner =
         | _ as s -> s
 
     let trySscanfExt context advancedScanners opts (pf:PrintfFormat<_,_,_,_,'t>) s : 't option =
-        //raise <| FormatException(sprintf "Unable to scan string '%s' with regex '%s'" s regexString)
         match sscanfExtHelper context advancedScanners opts pf s with
         | ScanSuccess matches -> toGenericTuple matches |> Some
         | _ -> None
@@ -343,7 +348,7 @@ module InstallModel =
     open PlatformMatching
     open NuGet
 
-    let emptyModel packageName packageVersion = {
+    let emptyModel packageName packageVersion kind = {
         PackageName = packageName
         PackageVersion = packageVersion
         CompileLibFolders = []
@@ -353,6 +358,7 @@ module InstallModel =
         TargetsFileFolders = []
         Analyzers = []
         LicenseUrl = None
+        Kind = kind
     }
 
     type Tfm = PlatformMatching.ParsedPlatformPath
@@ -366,7 +372,7 @@ module InstallModel =
                 (fun upf ->
                     (FolderScanner.choose "invalid tfm" (fun plats ->
                     let parsed = PlatformMatching.extractPlatforms false plats
-                    if parsed.IsNone then
+                    if parsed.IsNone && not (plats.StartsWith "_") then
                         traceWarnIfNotBefore ("File", plats, upf.BasePath) "Could not detect any platforms from '%s' in '%s', please tell the package authors" plats upf.FullPath
                     parsed)) >> FolderScanner.ParseResult.box) }
           { FolderScanner.AdvancedScanner.Name = "rid";
@@ -462,9 +468,6 @@ module InstallModel =
         getAllFiles installModel.CompileLibFolders (fun f -> f.Libraries |> Set.toSeq)
         |> Seq.cache
 
-    [<Obsolete("usually this should not be used")>]
-    let getCompileLibFolders (installModel: InstallModel) = installModel.CompileLibFolders
-
     /// This is for reference assemblies (new dotnetcore world)
     let getCompileReferences (target: TargetProfile) (installModel : InstallModel) =
         let results =
@@ -495,7 +498,7 @@ module InstallModel =
             |> Seq.forall (fun (libs, refs) -> Seq.isEmpty libs && Seq.isEmpty refs)
 
         if foldersEmpty && List.isEmpty this.Analyzers then
-            emptyModel this.PackageName this.PackageVersion
+            emptyModel this.PackageName this.PackageVersion this.Kind
         else
             this
 
@@ -822,16 +825,16 @@ module InstallModel =
         |> addLicense content.Spec.LicenseUrl
         |> filterUnknownFiles
 
-    let createFromContent packageName packageVersion frameworkRestrictions content =
-        emptyModel packageName packageVersion
+    let createFromContent packageName packageVersion kind frameworkRestrictions content =
+        emptyModel packageName packageVersion kind
         |> addNuGetFiles content
         |> filterBlackList
         |> applyFrameworkRestrictions frameworkRestrictions
         |> removeIfCompletelyEmpty
 
     [<Obsolete "use createFromContent instead">]
-    let createFromLibs packageName packageVersion frameworkRestrictions (libs:UnparsedPackageFile seq) targetsFiles analyzerFiles (nuspec:Nuspec) =
-        emptyModel packageName packageVersion
+    let createFromLibs packageName packageVersion kind frameworkRestrictions (libs:UnparsedPackageFile seq) targetsFiles analyzerFiles (nuspec:Nuspec) =
+        emptyModel packageName packageVersion kind
         |> addLibReferences libs nuspec.References
         |> addTargetsFiles targetsFiles
         |> addAnalyzerFiles analyzerFiles
@@ -843,10 +846,12 @@ module InstallModel =
 
 type InstallModel with
 
-    static member EmptyModel (packageName, packageVersion) = InstallModel.emptyModel packageName packageVersion
+    static member EmptyModel (packageName, packageVersion, ?kind) =
+        let kind = kind |> Option.defaultValue InstallModelKind.Package
+        InstallModel.emptyModel packageName packageVersion kind
 
     [<Obsolete("usually this should not be used")>]
-    member this.GetReferenceFolders() = InstallModel.getCompileLibFolders this
+    member this.GetReferenceFolders() = this.CompileLibFolders
 
 
     member this.GetLegacyReferences target = InstallModel.getLegacyReferences target this
@@ -921,9 +926,9 @@ type InstallModel with
 
     member this.RemoveIfCompletelyEmpty() = InstallModel.removeIfCompletelyEmpty this
 
-    static member CreateFromContent(packageName, packageVersion, frameworkRestriction:FrameworkRestriction, content : NuGetPackageContent) =
-        InstallModel.createFromContent packageName packageVersion frameworkRestriction content
+    static member CreateFromContent(packageName, packageVersion, kind, frameworkRestriction:FrameworkRestriction, content : NuGetPackageContent) =
+        InstallModel.createFromContent packageName packageVersion kind frameworkRestriction content
 
     [<Obsolete "use CreateFromContent instead">]
-    static member CreateFromLibs(packageName, packageVersion, frameworkRestriction:FrameworkRestriction, libs : UnparsedPackageFile seq, targetsFiles, analyzerFiles, nuspec : Nuspec) =
-        InstallModel.createFromLibs packageName packageVersion frameworkRestriction libs targetsFiles analyzerFiles nuspec
+    static member CreateFromLibs(packageName, packageVersion, kind, frameworkRestriction:FrameworkRestriction, libs : UnparsedPackageFile seq, targetsFiles, analyzerFiles, nuspec : Nuspec) =
+        InstallModel.createFromLibs packageName packageVersion kind frameworkRestriction libs targetsFiles analyzerFiles nuspec

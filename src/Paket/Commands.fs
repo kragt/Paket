@@ -30,6 +30,7 @@ type AddArgs =
     | [<Unique>] Keep_Minor
     | [<Unique>] Keep_Patch
     | [<Unique>] Touch_Affected_Refs
+    | [<Unique;AltCommandLine("-t")>] Type of packageType:AddArgsDependencyType
 with
     interface IArgParserTemplate with
         member this.Usage =
@@ -59,6 +60,10 @@ with
             | Keep_Minor -> "only allow updates that preserve the minor version"
             | Keep_Patch -> "only allow updates that preserve the patch version"
             | Touch_Affected_Refs -> "touch project files referencing affected dependencies to help incremental build tools detecting the change"
+            | Type _ -> "the type of dependency: nuget|clitool (default: nuget)"
+and [<RequireQualifiedAccess>] AddArgsDependencyType =
+    | Nuget
+    | Clitool
 
 type ConfigArgs =
     | [<Unique;CustomCommandLine("add-credentials")>] AddCredentials of key_or_URL:string
@@ -227,10 +232,12 @@ with
             | No_Install -> "do not modify projects"
 
 type ClearCacheArgs =
-    | [<Hidden;NoCommandLine>] NoArgs
+    | [<Unique;AltCommandLine("--clear-local")>] ClearLocal
 with
     interface IArgParserTemplate with
-        member __.Usage = ""
+        member this.Usage =
+            match this with
+            | ClearLocal -> "Clears local packages folder and paket-files."
 
 type RestoreArgs =
     | [<Unique;AltCommandLine("-f")>] Force
@@ -424,6 +431,14 @@ with
             | Max_Results(_) -> "limit maximum number of results"
             | Max_Results_Legacy(_) -> "[obsolete]"
 
+type InfoArgs =
+    | [<Unique>] Paket_Dependencies_Dir
+with
+    interface IArgParserTemplate with
+        member this.Usage =
+            match this with
+            | Paket_Dependencies_Dir -> "absolute path of paket.dependencies directory, if exists"
+
 type PackArgs =
     | [<ExactlyOnce;MainCommand>] Output of path:string
     | [<Hidden;ExactlyOnce;CustomCommandLine("output")>] Output_Legacy of path:string
@@ -615,6 +630,7 @@ type Command =
     | [<Hidden;CustomCommandLine("generate-include-scripts")>] GenerateIncludeScripts of ParseResults<GenerateLoadScriptsArgs>
     | [<CustomCommandLine("generate-load-scripts")>]    GenerateLoadScripts of ParseResults<GenerateLoadScriptsArgs>
     | [<CustomCommandLine("why")>]                      Why of ParseResults<WhyArgs>
+    | [<CustomCommandLine("info")>]                     Info of ParseResults<InfoArgs>
 with
     interface IArgParserTemplate with
         member this.Usage =
@@ -626,7 +642,7 @@ with
             | FindRefs _ -> "find all project files that have a dependency installed"
             | Init _ -> "create an empty paket.dependencies file in the current working directory"
             | AutoRestore _ -> "manage automatic package restore during the build process inside Visual Studio"
-            | Install _ -> "download dependencies and update projects"
+            | Install _ -> "compute dependency graph, download dependencies and update projects"
             | Outdated _ -> "find dependencies that have newer versions available"
             | Remove _ -> "remove a dependency"
             | Restore _ -> "download the computed dependency graph"
@@ -644,6 +660,7 @@ with
             | GenerateIncludeScripts _ -> "[obsolete]"
             | GenerateLoadScripts _ -> "generate F# and C# include scripts that reference installed packages in a interactive environment like F# Interactive or ScriptCS"
             | Why _ -> "determine why a dependency is required"
+            | Info _ -> "info"
             | Log_File _ -> "print output to a file"
             | Silent -> "suppress console output"
             | Verbose -> "print detailed information to the console"

@@ -7,14 +7,8 @@ nuget FSharp.Core redirects: force
 nuget Chessie >= 0.6
 nuget Mono.Cecil prerelease
 
-nuget System.Diagnostics.TraceSource 
-nuget System.Diagnostics.FileVersionInfo 
-nuget System.Xml.XDocument 
-nuget System.Xml.XPath.XmlDocument 
-nuget System.Diagnostics.Process 
-nuget System.Xml.XPath.XDocument 
 nuget System.Security.Cryptography.ProtectedData 
-nuget System.Security.Cryptography.Algorithms
+
 nuget FSharp.Compiler.Tools
 
 nuget NETStandard.Library >= 2.0 prerelease
@@ -27,14 +21,22 @@ nuget NUnit redirects: force
 nuget NUnit.Console
 // current workaround for https://github.com/nunit/nunit3-vs-adapter/issues/366
 nuget NUnit3TestAdapter version_in_path: true
+clitool dotnet-mergenupkg
 
 github fsharp/FAKE src/app/FakeLib/Globbing/Globbing.fs
-github fsprojects/FSharp.TypeProviders.StarterPack src/AssemblyReader.fs
+github fsprojects/FSharp.TypeProviders.SDK:dc5ac01a1ac288eceb1fd6f12a5d388236f4f8e5 src/AssemblyReader.fs
 github forki/FsUnit FsUnit.fs
 
+group NetCoreTools
+  storage: none
+  source https://nuget.org/api/v2
+
+  nuget SourceLink.Create.CommandLine 2.1.1
+  nuget SourceLink.Embed.PaketFiles 2.1.1
 
 group Build
   content: none
+  framework >= net461
   source https://nuget.org/api/v2
   source https://ci.appveyor.com/nuget/fsharp-formatting
   

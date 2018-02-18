@@ -1,6 +1,7 @@
 module Paket.Why
 
 open System
+open System.Collections.Generic
 
 open Paket.Domain
 open Paket.Logging
@@ -8,45 +9,39 @@ open Paket.Requirements
 
 open Chessie.ErrorHandling
 
-type AdjLblGraph<'a, 'b> = list<'a * list<('a * 'b)>>
+type AdjLblGraph<'a> = IDictionary<PackageName , IDictionary<PackageName, 'a>>
 
-type LblPath<'a, 'b> = 'a * LblPathNode<'a, 'b>
+type LblPath<'a> = PackageName * LblPathNode<'a>
 
-and LblPathNode<'a, 'b> =
-| LblPathNode of LblPath<'a, 'b>
-| LblPathLeaf of 'a * 'b
+and LblPathNode<'a> =
+| LblPathNode of LblPath<'a>
+| LblPathLeaf of PackageName * 'a
 
 module AdjLblGraph =
-    let adj n (g: AdjLblGraph<_, _>) =
-        g
-        |> List.find (fst >> (=) n)
-        |> snd
-
-    let removeEdge ((n1,n2): 'a * 'a) (g: AdjLblGraph<'a, 'b>) =
-        g
-        |> List.map (fun (n, es) -> 
-            if n1 <> n then 
-                (n,es)
-            else
-                (n,es |> List.filter (fst >> ((<>)n2))))
-
-    let rec paths start stop g : list<LblPath<_, _>> =
-        [ for (n, lbl) in adj start g do
+    let rec paths start stop visited (g: AdjLblGraph<_>) : list<LblPath<_>> =
+        let adjacents = 
+            g.[start]
+            |> Seq.filter (fun kv -> not (Set.contains kv.Key visited))
+        [ for kv in adjacents do
+            let n, lbl = kv.Key, kv.Value
             if n = stop then yield (start, LblPathLeaf (stop, lbl))
-            for path in paths n stop (removeEdge (start,n) g) do 
+            for path in paths n stop (Set.add n visited) g do 
                 yield (start, LblPathNode path)]
 
-let depGraph (res : PackageResolver.PackageResolution) : AdjLblGraph<_,_> =
+let depGraph (res : PackageResolver.PackageResolution) : AdjLblGraph<_> =
     res
-    |> Seq.toList
-    |> List.map (fun pair -> pair.Key, (pair.Value.Dependencies 
-                                       |> Set.map (fun (p,v,f) -> p,(v,f)) 
-                                       |> Set.toList))
+    |> Seq.map (fun pair -> 
+        let k = pair.Key
+        let v = pair.Value.Dependencies
+                |> Seq.map (fun (p,v,f) -> p,(v,f)) 
+                |> dict
+        k,v)
+    |> dict
 
 type WhyOptions = 
     { Details : bool }
 
-type DependencyChain = LblPath<PackageName, (VersionRequirement * FrameworkRestrictions)>
+type DependencyChain = LblPath<VersionRequirement * FrameworkRestrictions>
 
 [<CompilationRepresentation(CompilationRepresentationFlags.ModuleSuffix)>]
 module DependencyChain =
@@ -137,7 +132,7 @@ module Reason =
                 NuGetNotInGroup otherGroups
 
         let group = lockFile.GetGroup groupName
-        if not <| group.Resolution.ContainsKey packageName then
+        if not (group.Resolution.ContainsKey packageName) then
             inferError () 
             |> List.singleton 
             |> Result.Bad
@@ -150,7 +145,7 @@ module Reason =
             let chains = 
                 topLevelDeps
                 |> Set.toList
-                |> List.collect (fun p -> AdjLblGraph.paths p packageName graph)
+                |> List.collect (fun p -> AdjLblGraph.paths p packageName Set.empty graph)
             match Set.contains packageName directDeps, Set.contains packageName topLevelDeps with
             | true, true ->
                 Result.Ok ((TopLevel, group.Resolution), [])
@@ -188,7 +183,7 @@ let ohWhy (packageName,
         | TopLevel -> ()
         | Direct chains
         | Transitive chains ->
-            tracefn "It's a part of following dependency chains:"
+            tracefn "It is part of following dependency chains:"
             tracen ""
             for (top, chains) in chains |> List.groupBy (DependencyChain.first) do
                 match chains |> List.sortBy DependencyChain.length, options.Details with

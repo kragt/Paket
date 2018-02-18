@@ -36,7 +36,8 @@ module internal NuSpecParserHelper =
             match PlatformMatching.extractPlatforms false framework with
             | Some pp -> Some (name, version, pp)
             | None ->
-                Logging.traceWarnIfNotBefore ("NuSpecFile", framework, fileName) "Could not detect any platforms from '%s' in '%s', please tell the package authors" framework fileName
+                if not (framework.StartsWith "_") then
+                    Logging.traceWarnIfNotBefore ("NuSpecFile", framework, fileName) "Could not detect any platforms from '%s' in '%s', please tell the package authors" framework fileName
                 None
         | _ -> Some(name,version, PlatformMatching.ParsedPlatformPath.Empty)
 
@@ -51,21 +52,23 @@ module internal NuSpecParserHelper =
         | Some name, Some targetFrameworks ->
             targetFrameworks.Split([|','; ' '|],System.StringSplitOptions.RemoveEmptyEntries)
             |> Array.choose FrameworkDetection.Extract
-            |> Array.map (fun fw -> { AssemblyName = name; FrameworkRestrictions = ExplicitRestriction (FrameworkRestriction.Exactly fw) })
+            |> Array.map (fun fw -> 
+                { AssemblyName = name
+                  FrameworkRestrictions = ExplicitRestriction (FrameworkRestriction.Exactly fw) })
             |> Array.toList
         | _ -> []
 
 type Nuspec = 
     { References : NuspecReferences 
-      Dependencies : (PackageName * VersionRequirement * FrameworkRestrictions) list
+      Dependencies : Lazy<(PackageName * VersionRequirement * FrameworkRestrictions) list>
       OfficialName : string
       // Currently only used for testing
       Version : string
       LicenseUrl : string
       IsDevelopmentDependency : bool
       FrameworkAssemblyReferences : FrameworkAssemblyReference list }
-    static member All = { Version = ""; References = NuspecReferences.All; Dependencies = []; FrameworkAssemblyReferences = []; OfficialName = ""; LicenseUrl = ""; IsDevelopmentDependency = false }
-    static member Explicit references = { Version = ""; References = NuspecReferences.Explicit references; Dependencies = []; FrameworkAssemblyReferences = []; OfficialName = ""; LicenseUrl = ""; IsDevelopmentDependency = false }
+    static member All = { Version = ""; References = NuspecReferences.All; Dependencies = lazy []; FrameworkAssemblyReferences = []; OfficialName = ""; LicenseUrl = ""; IsDevelopmentDependency = false }
+    static member Explicit references = { Version = ""; References = NuspecReferences.Explicit references; Dependencies = lazy []; FrameworkAssemblyReferences = []; OfficialName = ""; LicenseUrl = ""; IsDevelopmentDependency = false }
 
     /// load the file from an XmlDocument. The fileName is only used for error reporting.
     static member private Load(fileName:string, doc:XmlDocument) =
@@ -79,7 +82,8 @@ type Nuspec =
                     match PlatformMatching.extractPlatforms false framework with
                     | Some p -> Some p
                     | None ->
-                        Logging.traceWarnIfNotBefore ("NuSpecFile", framework, fileName) "Could not detect any platforms from '%s' in '%s', please tell the package authors" framework fileName
+                        if not (framework.StartsWith "_") then
+                            Logging.traceWarnIfNotBefore ("NuSpecFile", framework, fileName) "Could not detect any platforms from '%s' in '%s', please tell the package authors" framework fileName
                         None
                 | _ -> Some PlatformMatching.ParsedPlatformPath.Empty)
 
@@ -87,9 +91,7 @@ type Nuspec =
             doc 
             |> getDescendants "dependency"
             |> List.choose (NuSpecParserHelper.getDependency fileName)
-
-        let dependencies, warnings = addFrameworkRestrictionsToDependencies rawDependencies frameworks
-
+            
         let name =
             match doc |> getNode "package" |> optGetNode "metadata" |> optGetNode "id" with
             | Some node -> node.InnerText
@@ -99,8 +101,12 @@ type Nuspec =
             | Some node -> node.InnerText
             | None -> failwithf "unable to find package version in %s" fileName
 
-        for warning in warnings do
-            Logging.traceWarnfn "%s" (warning.Format name version)
+        let dependencies =
+          lazy
+            let dependencies, warnings = addFrameworkRestrictionsToDependencies rawDependencies frameworks
+            for warning in warnings do
+                Logging.traceWarnfn "%s" (warning.Format name version)
+            dependencies
 
         let references = 
             doc
@@ -131,7 +137,7 @@ type Nuspec =
                         FrameworkRestrictions =
                             ExplicitRestriction(
                                 restrictions
-                                |> List.map (fun x -> x.FrameworkRestrictions |> getExplicitRestriction)
+                                |> List.map (fun x -> getExplicitRestriction x.FrameworkRestrictions)
                                 |> List.fold FrameworkRestriction.combineRestrictionsWithOr FrameworkRestriction.EmptySet) } ] }
 
     /// load the file from an nuspec text stream. The fileName is only used for error reporting.

@@ -55,9 +55,9 @@ module ScriptGeneration =
         refls |> List.filter ( fun ref ->
             if scriptType = ScriptType.FSharp then 
                 match ref with 
-                | Assembly info -> not <| String.containsIgnoreCase "FSharp.Core" info.Name
-                | Framework info -> not <|  String.containsIgnoreCase "FSharp.Core" info
-                | LoadScript info -> not <| String.containsIgnoreCase "FSharp.Core" info.Name
+                | Assembly info -> not (String.containsIgnoreCase "FSharp.Core" info.Name)
+                | Framework info -> not (String.containsIgnoreCase "FSharp.Core" info)
+                | LoadScript info -> not (String.containsIgnoreCase "FSharp.Core" info.Name)
             else true
         )
 
@@ -116,26 +116,39 @@ module ScriptGeneration =
             let refString (reference:ReferenceType)  = 
                 match reference, self.Lang with
                 | Assembly file, _ ->
-                     sprintf """#r "%s" """ <| relativePath scriptFile file
+                     sprintf """#r "%s" """ (relativePath scriptFile file)
                 | LoadScript script, ScriptType.FSharp ->
-                     sprintf """#load @"%s" """ <| relativePath scriptFile script
+                     sprintf """#load @"%s" """ (relativePath scriptFile script)
                 | LoadScript script, ScriptType.CSharp ->     
-                     sprintf """#load "%s" """ <| relativePath scriptFile script
+                     sprintf """#load "%s" """ (relativePath scriptFile script)
                 | Framework name,_ ->
                      sprintf """#r "%s" """ name
         
             self.Input |> Seq.map refString |> Seq.distinct |> String.concat "\n"
         
         /// Save the script in '<directory>/.paket/load/<script>'
-        member self.Save (directory:DirectoryInfo) = 
-            directory.Create()
-            let scriptFile = FileInfo (directory.FullName </> self.PartialPath)
+        member self.Save (rootPath:DirectoryInfo) =
+            if not rootPath.Exists then rootPath.Create()
+            let scriptFile = FileInfo (rootPath.FullName </> self.PartialPath)
             if verbose then
                 verbosefn "generating script - %s" scriptFile.FullName
-            scriptFile.Directory.Create()
-            let text = self.Render directory
-            File.WriteAllText (scriptFile.FullName, text)
+            if not scriptFile.Directory.Exists then scriptFile.Directory.Create()            
+            
+            let existingFileContents =
+                if scriptFile.Exists then
+                    try
+                        File.ReadAllText scriptFile.FullName
+                    with
+                    | exn -> failwithf "Could not read load script file %s. Message: %s" scriptFile.FullName exn.Message
+                else
+                    ""
 
+            let text = self.Render rootPath
+            try
+                if existingFileContents <> text then
+                    File.WriteAllText (scriptFile.FullName, text)
+            with
+            | exn -> failwithf "Could not write load script file %s. Message: %s" scriptFile.FullName exn.Message
 
     type PaketContext = {
         Cache : DependencyCache
@@ -148,7 +161,7 @@ module ScriptGeneration =
 
     /// Generate a include scripts for all packages defined in paket.dependencies,
     /// if a package is ordered before its dependencies this function will throw.
-    let generateScriptContent (context:PaketContext as ctx) =
+    let generateScriptContent (ctx:PaketContext) =
         
         let scriptType, groups, (isDefaultFramework, framework) = ctx.ScriptType, ctx.Groups, ctx.DefaultFramework
 
@@ -249,21 +262,19 @@ module ScriptGeneration =
         
 
     let constructScriptsFromData (depCache:DependencyCache) (groups:GroupName list) providedFrameworks providedScriptTypes =
-        let dependenciesFile = depCache.DependenciesFile
-        let frameworksForDependencyGroups = dependenciesFile.ResolveFrameworksForScriptGeneration()
-        let environmentFramework = FrameworkDetection.resolveEnvironmentFramework
         let lockFile = depCache.LockFile
-
+        let frameworksForDependencyGroups = lockFile.ResolveFrameworksForScriptGeneration()
+        let environmentFramework = FrameworkDetection.resolveEnvironmentFramework
+        
         let groups = 
             if List.isEmpty groups then 
-                dependenciesFile.Groups |> Seq.map (fun kvp -> kvp.Key) |> Seq.toList 
+                lockFile.Groups |> Seq.map (fun kvp -> kvp.Key) |> Seq.toList 
             else 
                 groups
         
         if verbose then
             verbosefn "Generating load scripts for the following groups: %A" (groups |> List.map (fun g -> g.Name.ToString()))
-            verbosefn " - using Paket dependency file: %s" dependenciesFile.FileName
-            verbosefn " - using Packe fock file: %s" lockFile.FileName
+            verbosefn " - using Paket lock file: %s" lockFile.FileName
 
         let tupleMap f v = (v, f v)
         let failOnMismatch toParse parsed fn message =
@@ -273,8 +284,7 @@ module ScriptGeneration =
                 |> Seq.filter (snd >> Option.isNone)
                 |> Seq.map fst
                 |> String.concat ", "
-                |> sprintf "%s: %s. Cannot generate include scripts." message
-                |> failwith
+                |> failwithf "%s: %s. Can't generate load scripts." message
 
         // prepare list of frameworks to generate, paired with "is default framework"
         // default framework will get generated under root folder rather than framework specific subfolder
@@ -350,7 +360,8 @@ module ScriptGeneration =
                             tracefn "Could not generate any scripts for group '%O'" group
                         else
                             tracefn "[ Group - %O ]" group  
-                            scriptContent |> Seq.iter (fun sc -> tracefn " - %O" sc.PartialPath)
+                            for sc in scriptContent do
+                                tracefn " - %O" sc.PartialPath
         let generated =
             scriptData 
             |> Seq.collect (fun (_fw,groupedContent) -> 

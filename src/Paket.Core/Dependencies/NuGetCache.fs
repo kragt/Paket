@@ -16,7 +16,16 @@ open Paket.Requirements
 open FSharp.Polyfill
 open System.Runtime.ExceptionServices
 
+open System.Net
 open System.Threading.Tasks
+
+
+// show the path that was too long
+let FileInfo(str) =
+    try
+        FileInfo(str)
+    with
+      :? PathTooLongException as exn -> raise (PathTooLongException("Path too long: " + str, exn))
 
 type NuGetResponseGetVersionsSuccess = string []
 type NuGetResponseGetVersionsFailure =
@@ -57,12 +66,12 @@ type NuGetRequestGetVersions =
         async {
             try
                 return! r.DoRequest()
-            with e -> 
+            with e ->
                 return FailedVersionRequest { Url = r.Url; Error = System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture e }
         }
-        
 
-// An unparsed file in the nuget package -> still need to inspect the path for further information. After parsing an entry will be part of a "LibFolder" for example.
+
+// An unparsed file in the NuGet package -> still need to inspect the path for further information. After parsing an entry will be part of a "LibFolder" for example.
 type UnparsedPackageFile =
     { FullPath : string
       PathWithinPackage : string }
@@ -71,7 +80,7 @@ type UnparsedPackageFile =
 
 module NuGetConfig =
     open System.Text
-    
+
     let writeNuGetConfig directory sources =
         let start = """<?xml version="1.0" encoding="utf-8"?>
 <configuration>
@@ -90,12 +99,12 @@ module NuGetConfig =
 </configuration>""") |> ignore
         let text = sb.ToString()
         let fileName = Path.Combine(directory,Constants.NuGetConfigFile)
-        if not <| File.Exists fileName then
+        if not (File.Exists fileName) then
             File.WriteAllText(fileName,text)
         else
             if File.ReadAllText(fileName) <> text then
                 File.WriteAllText(fileName,text)
-       
+
 type FrameworkRestrictionsCache = string
 
 type NuGetPackageCache =
@@ -108,7 +117,7 @@ type NuGetPackageCache =
       Version: string
       CacheVersion: string }
 
-    static member CurrentCacheVersion = "5.2"
+    static member CurrentCacheVersion = "5.114"
 
 // TODO: is there a better way? for now we use static member because that works with type abbreviations...
 //module NuGetPackageCache =
@@ -117,40 +126,46 @@ type NuGetPackageCache =
             SerializedDependencies =
                 l
                 |> List.map (fun (n,v, restrictions) ->
-                    let restrictionString = 
+                    let restrictionString =
                         match restrictions with
                         | FrameworkRestrictions.AutoDetectFramework -> "AUTO"
-                        | FrameworkRestrictions.ExplicitRestriction re ->
-                            re.ToString()
+                        | FrameworkRestrictions.ExplicitRestriction re -> re.ToString()
                     n, v, restrictionString) }
+
     static member getDependencies (x:NuGetPackageCache) : (PackageName * VersionRequirement * FrameworkRestrictions) list  =
         x.SerializedDependencies
         |> List.map (fun (n,v,restrictionString) ->
             let restrictions =
                 if restrictionString = "AUTO" then
                     FrameworkRestrictions.AutoDetectFramework
-                else FrameworkRestrictions.ExplicitRestriction(Requirements.parseRestrictions restrictionString |> fst)
+                else
+                    let restrictions = Requirements.parseRestrictions restrictionString |> fst
+                    FrameworkRestrictions.ExplicitRestriction restrictions
             n, v, restrictions)
 
 let inline normalizeUrl(url:string) = url.Replace("https://","http://").Replace("www.","")
 
-let getCacheFiles cacheVersion nugetURL (packageName:PackageName) (version:SemVerInfo) =
+let getCacheFiles force cacheVersion nugetURL (packageName:PackageName) (version:SemVerInfo) =
     let h = nugetURL |> normalizeUrl |> hash |> abs
-    let prefix = 
-        sprintf "%O.%s.s%d" packageName (version.Normalize()) h
-    let packageUrl = 
-        sprintf "%s_v%s.json" 
-           prefix cacheVersion
-    let newFile = Path.Combine(Constants.NuGetCacheFolder,packageUrl)
-    let oldFiles =
-        Directory.EnumerateFiles(Constants.NuGetCacheFolder, sprintf "%s*.json" prefix)
-        |> Seq.filter (fun p -> Path.GetFileName p <> packageUrl)
-        |> Seq.toList
-    FileInfo(newFile), oldFiles
+    let prefix = sprintf "%O.%s.s%d" packageName (version.Normalize()) h
+    let packageUrl = sprintf "%s_v%s.json" prefix cacheVersion
+    let newFile = Path.Combine(Constants.NuGetCacheFolder, packageUrl)
+    if force then // cleanup only on slow-path
+        try
+            let oldFiles =
+                Directory.EnumerateFiles(Constants.NuGetCacheFolder, sprintf "%s*.json" prefix)
+                |> Seq.filter (fun p -> Path.GetFileName p <> packageUrl)
+                |> Seq.toList
+            for f in oldFiles do
+                File.Delete f
+        with 
+        | ex -> traceErrorfn "Cannot cleanup '%s': %O" (sprintf "%s*.json" prefix) ex
+    FileInfo(newFile)
 
 type ODataSearchResult =
     | EmptyResult
     | Match of NuGetPackageCache
+
 module ODataSearchResult =
     let get x =
         match x with
@@ -158,44 +173,61 @@ module ODataSearchResult =
         | Match r -> r
 
 let tryGetDetailsFromCache force nugetURL (packageName:PackageName) (version:SemVerInfo) : ODataSearchResult option =
-    let cacheFile, oldFiles = getCacheFiles NuGetPackageCache.CurrentCacheVersion nugetURL packageName version
-    oldFiles |> Seq.iter (fun f -> File.Delete f)
+    let cacheFile = getCacheFiles force NuGetPackageCache.CurrentCacheVersion nugetURL packageName version
     if not force && cacheFile.Exists then
-        let json = File.ReadAllText(cacheFile.FullName)
-        let cacheResult =
+        try
+            let json = File.ReadAllText(cacheFile.FullName)
+
             try
-                let cachedObject = JsonConvert.DeserializeObject<NuGetPackageCache> json
-                if (PackageName cachedObject.PackageName <> packageName) ||
-                    (cachedObject.Version <> version.Normalize())
-                then
-                    traceVerbose (sprintf "Invalidating Cache '%s:%s' <> '%s:%s'" cachedObject.PackageName cachedObject.Version packageName.Name (version.Normalize()))
-                    cacheFile.Delete()
-                    None
-                else
-                    Some cachedObject
+                let cacheResult =
+                    let cachedObject = JsonConvert.DeserializeObject<NuGetPackageCache> json
+                    if (PackageName cachedObject.PackageName <> packageName) ||
+                        (cachedObject.Version <> version.Normalize())
+                    then
+                        if verbose then
+                            traceVerbose (sprintf "Invalidating Cache '%s:%s' <> '%s:%s'" cachedObject.PackageName cachedObject.Version packageName.Name (version.Normalize()))
+                        cacheFile.Delete()
+                        None
+                    else
+                        Some cachedObject
+
+                match cacheResult with
+                | Some res -> Some (ODataSearchResult.Match res)
+                | None -> None
             with
             | exn ->
-                cacheFile.Delete()
+                try cacheFile.Delete() with | _ -> ()
                 if verbose then
                     traceWarnfn "Error while loading cache: %O" exn
-                else
-                    traceWarnfn "Error while loading cache: %s" exn.Message
                 None
-        match cacheResult with
-        | Some res -> Some (ODataSearchResult.Match res)
-        | None -> None
+        with
+        | exn ->
+            if verbose then
+                traceWarnfn "Error while reading cache file: %O" exn
+            None
     else
         None
 
 let getDetailsFromCacheOr force nugetURL (packageName:PackageName) (version:SemVerInfo) (get : unit -> ODataSearchResult Async) : ODataSearchResult Async =
-    let cacheFile, oldFiles = getCacheFiles NuGetPackageCache.CurrentCacheVersion nugetURL packageName version
-    oldFiles |> Seq.iter (fun f -> File.Delete f)
+    let cacheFile = getCacheFiles force NuGetPackageCache.CurrentCacheVersion nugetURL packageName version
     let get() =
         async {
             let! result = get()
             match result with
             | ODataSearchResult.Match result ->
-                File.WriteAllText(cacheFile.FullName,JsonConvert.SerializeObject(result))
+                let serialized = JsonConvert.SerializeObject(result)
+                let cachedData =
+                    try
+                        if cacheFile.Exists then
+                            use cacheReader = cacheFile.OpenText()
+                            cacheReader.ReadToEnd()
+                        else ""
+                    with 
+                    | ex ->
+                        traceWarnfn "Can't read cache file %O:%s Message: %O" cacheFile Environment.NewLine ex 
+                        ""
+                if String.CompareOrdinal(serialized, cachedData) <> 0 then
+                    File.WriteAllText(cacheFile.FullName, serialized)
             | _ ->
                 // TODO: Should we cache 404? Probably not.
                 ()
@@ -222,14 +254,14 @@ let fixDatesInArchive fileName =
             | _ -> e.LastWriteTime <- maxTime
     with
     | exn -> traceWarnfn "Could not fix timestamps in %s. Error: %s" fileName exn.Message
-    
+
 
 let fixArchive fileName =
     if isMonoRuntime then
         fixDatesInArchive fileName
 
-let GetLicenseFileName (packageName:PackageName) (version:SemVerInfo) = packageName.ToString() + "." + version.Normalize() + ".license.html"
-let GetPackageFileName (packageName:PackageName) (version:SemVerInfo) = packageName.ToString() + "." + version.Normalize() + ".nupkg"
+let GetLicenseFileName (packageName:PackageName) (version:SemVerInfo) = packageName.CompareString + "." + version.Normalize() + ".license.html"
+let GetPackageFileName (packageName:PackageName) (version:SemVerInfo) = packageName.CompareString + "." + version.Normalize() + ".nupkg"
 
 let inline isExtracted (directory:DirectoryInfo) (packageName:PackageName) (version:SemVerInfo) =
     let inDir f = Path.Combine(directory.FullName, f)
@@ -239,7 +271,9 @@ let inline isExtracted (directory:DirectoryInfo) (packageName:PackageName) (vers
     if not fi.Exists then false else
     if not directory.Exists then false else
     directory.EnumerateFileSystemInfos()
-    |> Seq.exists (fun f -> f.FullName <> fi.FullName && f.FullName <> licenseFile)
+    |> Seq.exists (fun f ->
+        (not (String.equalsIgnoreCase f.FullName fi.FullName)) &&
+          (not (String.equalsIgnoreCase f.FullName licenseFile)))
 
 let IsPackageVersionExtracted(config:ResolvedPackagesFolder, packageName:PackageName, version:SemVerInfo) =
     match config.Path with
@@ -276,31 +310,33 @@ let rec private cleanup (dir : DirectoryInfo) =
         let newFullName = Path.Combine(file.DirectoryName, newName)
         if file.Name <> newName && not (File.Exists newFullName) then
             let dir = Path.GetDirectoryName newFullName
-            if not <| Directory.Exists dir then
+            if not (Directory.Exists dir) then
                 Directory.CreateDirectory dir |> ignore
 
             File.Move(file.FullName, newFullName)
 
 
-let GetTargetUserFolder packageName (version:SemVerInfo) =
-    DirectoryInfo(Path.Combine(Constants.UserNuGetPackagesFolder,packageName.ToString(),version.Normalize())).FullName
-let GetTargetUserNupkg packageName (version:SemVerInfo) =
+let GetTargetUserFolder (packageName:PackageName) (version:SemVerInfo) =
+    DirectoryInfo(Path.Combine(Constants.UserNuGetPackagesFolder,packageName.CompareString,version.Normalize())).FullName
+
+let GetTargetUserNupkg (packageName:PackageName) (version:SemVerInfo) =
     let normalizedNupkgName = GetPackageFileName packageName version
     let path = GetTargetUserFolder packageName version
     Path.Combine(path, normalizedNupkgName)
 
-let GetTargetUserToolsFolder packageName (version:SemVerInfo) =
-    DirectoryInfo(Path.Combine(Constants.UserNuGetPackagesFolder,".tools",packageName.ToString(),version.Normalize())).FullName
+let GetTargetUserToolsFolder (packageName:PackageName) (version:SemVerInfo) =
+    DirectoryInfo(Path.Combine(Constants.UserNuGetPackagesFolder,".tools",packageName.CompareString,version.Normalize())).FullName
 
 /// Extracts the given package to the user folder
-let rec ExtractPackageToUserFolder(fileName:string, packageName:PackageName, version:SemVerInfo, isCliTool) =
+let rec ExtractPackageToUserFolder(fileName:string, packageName:PackageName, version:SemVerInfo, kind:PackageResolver.ResolvedPackageKind) =
     async {
         let! dir =
             async {
-                if isCliTool then
-                    let! _ = ExtractPackageToUserFolder(fileName, packageName, version, false)
+                match kind with
+                | PackageResolver.ResolvedPackageKind.DotnetCliTool ->
+                    let! _ = ExtractPackageToUserFolder(fileName, packageName, version, PackageResolver.ResolvedPackageKind.Package)
                     return GetTargetUserToolsFolder packageName version
-                else
+                | PackageResolver.ResolvedPackageKind.Package ->
                     return GetTargetUserFolder packageName version }
 
         let targetFolder = DirectoryInfo(dir)
@@ -314,9 +350,22 @@ let rec ExtractPackageToUserFolder(fileName:string, packageName:PackageName, ver
                 File.Copy(fileName,targetPackageFileName,true)
 
             ZipFile.ExtractToDirectory(fileName, targetFolder.FullName)
-
+            // lowercase the .nuspec file to mimic NuGet behavior
+            let nuspecFileName = sprintf "%s.nuspec" (packageName.ToString())
+            let nuspecLowerFileName = sprintf "%s.nuspec" (packageName.CompareString)
+            let filePath = Path.Combine(targetFolder.FullName, nuspecFileName)
+            let lowerFilePath = Path.Combine(targetFolder.FullName, nuspecLowerFileName)
+            if isUnix then
+                File.Move(filePath, lowerFilePath)
+            else
+                let nuspecTempFileName = sprintf "%s.nuspec.tmp" (packageName.CompareString)
+                let tempFilePath = Path.Combine(targetFolder.FullName, nuspecTempFileName)
+                // On windows we have to move the file twice to actually have the correct casing
+                // in the filesystem, because otherwise it is noop (at least in explorer)
+                File.Move(filePath, tempFilePath)
+                File.Move(tempFilePath, lowerFilePath)
             let cachedHashFile = Path.Combine(Constants.NuGetCacheFolder,fi.Name + ".sha512")
-            if not <| File.Exists cachedHashFile then
+            if not (File.Exists cachedHashFile) then
                 let packageHash = getSha512File fileName
                 File.WriteAllText(cachedHashFile,packageHash)
 
@@ -334,7 +383,7 @@ let ExtractPackage(fileName:string, targetFolder, packageName:PackageName, versi
              if verbose then
                  verbosefn "%O %O already extracted" packageName version
         else
-            Directory.CreateDirectory(targetFolder) |> ignore
+            Directory.CreateDirectory targetFolder |> ignore
 
             try
                 fixArchive fileName
@@ -343,8 +392,7 @@ let ExtractPackage(fileName:string, targetFolder, packageName:PackageName, versi
             | exn ->
                 let text = if detailed then sprintf "%s In rare cases a firewall might have blocked the download. Please look into the file and see if it contains text with further information." Environment.NewLine else ""
                 let path = try Path.GetFullPath fileName with :? PathTooLongException -> sprintf "%s (!too long!)" fileName
-                raise <| Exception(sprintf "Error during extraction of %s.%s%s" path Environment.NewLine text, exn)
-
+                raise (Exception(sprintf "Error during extraction of %s.%s%s" path Environment.NewLine text, exn))
 
             cleanup directory
             if verbose then
@@ -466,7 +514,10 @@ let private tryUrlOrBlacklist (f: _ -> Async<'a>) (isOk : 'a -> bool) (source:Nu
     | FirstCall t ->
         FirstCall (t |> Task.Map (fun (l, r) -> l, (r :?> 'a)))
 
-let tryAndBlacklistUrl doBlackList doWarn (source:NugetSource) (tryAgain : 'a -> bool) (f : string -> Async<'a>) (urls: UrlToTry list) : Async<'a>=
+type QueryResult = Choice<ODataSearchResult,System.Exception>
+
+let tryAndBlacklistUrl doBlackList doWarn (source:NugetSource) 
+    (tryAgain : QueryResult -> bool) (f : string -> Async<QueryResult>) (urls: UrlToTry list) : Async<QueryResult>=
     async {
         let! tasks, resultIndex =
             urls
@@ -474,7 +525,7 @@ let tryAndBlacklistUrl doBlackList doWarn (source:NugetSource) (tryAgain : 'a ->
                 let cached =
                     if doBlackList then
                         tryUrlOrBlacklist (fun () -> async { return! f url.InstanceUrl }) (tryAgain >> not) (source, url.UrlId)
-                    else 
+                    else
                         async {
                             let! result = f url.InstanceUrl
                             return (tryAgain result |> not, result)
@@ -491,12 +542,22 @@ let tryAndBlacklistUrl doBlackList doWarn (source:NugetSource) (tryAgain : 'a ->
                     let! (isOk, res) = task |> Async.AwaitTask
                     if not isOk then
                         if doWarn then
-                            eprintfn "Possible Performance degration, blacklist '%s'" url.InstanceUrl
+                            traceWarnIfNotBefore url.InstanceUrl "Possible Performance degradation, blacklist '%s'" url.InstanceUrl
                         return Choice2Of3 res
                     else
                         return Choice1Of3 res
                 })
-            |> Async.tryFindSequential (function | Choice1Of3 _ -> true | _ -> false)
+            |> Async.tryFindSequential
+                (fun result ->
+                    match result with
+                    | Choice1Of3 result ->
+                        match result with       // as per NuGetV2.fs ...
+                        | Choice1Of2 _ -> true  // this is the only valid result ...
+                        | Choice2Of2 except ->  
+                            match except with  // but NotFound/404 should allow other query to succeed
+                            | RequestStatus HttpStatusCode.NotFound -> false
+                            | _ -> true        // for any other exceptions, cancel the rest and return                         
+                    | _ -> false )
 
         match resultIndex with
         | Some i ->

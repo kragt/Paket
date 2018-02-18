@@ -5,10 +5,8 @@ open System.Text
 open System.Xml
 open System.Xml.Linq
 open System.IO
-open System.Reflection
 open Paket.Xml.Linq
 open System.Xml.XPath
-open Logging
 
 /// Represents a binding redirection
 type BindingRedirect = 
@@ -85,7 +83,7 @@ let internal indentAssemblyBindings config =
             parent.Remove()
 
 let private configFiles = [ "app"; "web" ] |> Set.ofList
-let private projectFiles = [ ".csproj"; ".vbproj"; ".fsproj"; ".wixproj"; ".nproj"; ".vcxproj"  ] |> Set.ofList
+let private projectFiles = [ ".csproj"; ".vbproj"; ".fsproj"; ".wixproj"; ".nproj"; ".vcxproj"; ".pyproj"; ".sfproj" ] |> Set.ofList
 let private toLower (s:string) = s.ToLower()
 let private isAppOrWebConfig = configFiles.Contains << (Path.GetFileNameWithoutExtension >> toLower)
 let private isDotNetProject = projectFiles.Contains << (Path.GetExtension >> toLower)
@@ -102,9 +100,7 @@ let internal getProjectFilesWithPaketReferences getFiles rootPath  =
     |> Seq.choose(fun directory -> getFiles(directory, "*proj", SearchOption.TopDirectoryOnly) |> Seq.tryFind (Path.GetExtension >> isDotNetProject))
     |> Seq.toList
 
-let private getExistingConfigFiles getFiles rootPath = 
-    getFiles(rootPath, "*.config", SearchOption.AllDirectories)
-    |> Seq.filter isAppOrWebConfig
+
 let private baseConfig = """<?xml version="1.0" encoding="utf-8"?>
 <configuration>
 </configuration>
@@ -158,7 +154,12 @@ let private applyBindingRedirects isFirstGroup cleanBindingRedirects (allKnownLi
     |> List.iter (fun e -> e.Remove())
 
     let config = Seq.fold setRedirect config bindingRedirects
-    indentAssemblyBindings config
+
+    try
+        indentAssemblyBindings config
+    with
+    | exn -> failwithf "Indenting binding redirects of %s failed.%s%s" configFilePath Environment.NewLine exn.Message
+
     use newContents = new StringReader(config.ToString())
     let newText = XDocument.Load(newContents, LoadOptions.None).ToString()
     if newText <> original then
@@ -181,11 +182,14 @@ let applyBindingRedirectsToFolder isFirstGroup createNewBindingFiles cleanBindin
             | _ -> None
         |> Option.iter (applyBindingRedirects isFirstGroup cleanBindingRedirects allKnownLibNames bindingRedirects)
     
-    rootPath
-    |> getProjectFilesWithPaketReferences Directory.GetFiles
-    |> Seq.map ProjectFile.TryLoad
-    |> Seq.choose id
-    |> Seq.iter applyBindingRedirects
+    let projects = 
+        rootPath
+        |> getProjectFilesWithPaketReferences Directory.GetFiles
+        |> Seq.map ProjectFile.TryLoad
+        |> Seq.choose id
+
+    for p in projects do
+        applyBindingRedirects p
 
 /// Calculates the short form of the public key token for use with binding redirects, if it exists.
 let getPublicKeyToken (assembly:Mono.Cecil.AssemblyDefinition) =

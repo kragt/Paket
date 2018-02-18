@@ -23,16 +23,12 @@ type PaketExiter() =
             else traceError msg ; exit 1
 
 let processWithValidationEx printUsage silent validateF commandF result =
-    if not <| validateF result then
+    if not (validateF result) then
         traceError "Command was:"
         traceError ("  " + String.Join(" ",Environment.GetCommandLineArgs()))
         printUsage result
 
-#if NETCOREAPP1_0
-        // Environment.ExitCode not supported in netcoreapp1.0
-#else
         Environment.ExitCode <- 1
-#endif
     else
         try
             commandF result
@@ -45,7 +41,11 @@ let processWithValidationEx printUsage silent validateF commandF result =
                     |> Seq.groupBy (fun (ev) -> ev.Category)
                     |> Seq.map (fun (cat, group) ->
                         let l = group |> Seq.toList
-                        cat, l.Length, l |> Seq.map (fun ev -> ev.Duration) |> Seq.fold (+) (TimeSpan()))
+                        let eventBoundaries = l |> List.collect(fun ev -> [ev.Start; ev.End])
+                        let mergedSpans = Profile.getCoalescedEventTimeSpans(eventBoundaries |> List.toArray)
+                        let mergedSpanLengths = mergedSpans |> Array.fold (+) (TimeSpan())
+
+                        cat, l.Length, mergedSpanLengths)
                     |> Seq.toList
                 let blockedRaw =
                     groupedResults
@@ -204,17 +204,21 @@ let add (results : ParseResults<_>) =
         (results.TryGetResult <@ AddArgs.Project @>,
          results.TryGetResult <@ AddArgs.Project_Legacy @>)
         |> legacyOption results (ReplaceArgument("--project", "project"))
+    let packageKind = 
+        match results.GetResult (<@ AddArgs.Type @>, defaultValue = AddArgsDependencyType.Nuget) with
+        | AddArgsDependencyType.Nuget -> Requirements.PackageRequirementKind.Package
+        | AddArgsDependencyType.Clitool -> Requirements.PackageRequirementKind.DotnetCliTool
 
     match project with
     | Some projectName ->
         Dependencies
             .Locate()
-            .AddToProject(group, packageName, version, force, redirects, cleanBindingRedirects, createNewBindingFiles, projectName, noInstall |> not, semVerUpdateMode, touchAffectedRefs, noResolve |> not)
+            .AddToProject(group, packageName, version, force, redirects, cleanBindingRedirects, createNewBindingFiles, projectName, noInstall |> not, semVerUpdateMode, touchAffectedRefs, noResolve |> not, packageKind)
     | None ->
         let interactive = results.Contains <@ AddArgs.Interactive @>
         Dependencies
             .Locate()
-            .Add(group, packageName, version, force, redirects, cleanBindingRedirects, createNewBindingFiles, interactive, noInstall |> not, semVerUpdateMode, touchAffectedRefs, noResolve |> not)
+            .Add(group, packageName, version, force, redirects, cleanBindingRedirects, createNewBindingFiles, interactive, noInstall |> not, semVerUpdateMode, touchAffectedRefs, noResolve |> not, packageKind)
 
 let validateConfig (results : ParseResults<_>) =
     let credential = results.Contains <@ ConfigArgs.AddCredentials @>
@@ -256,7 +260,7 @@ let convert (results : ParseResults<_>) =
     let noAutoRestore = results.Contains <@ ConvertFromNugetArgs.No_Auto_Restore @>
     let credsMigrationMode =
         (results.TryGetResult <@ ConvertFromNugetArgs.Migrate_Credentials @>,
-         results.TryGetResult <@ ConvertFromNugetArgs.Migrate_Credentials @>)
+         results.TryGetResult <@ ConvertFromNugetArgs.Migrate_Credentials_Legacy @>)
         |> legacyOption results (ReplaceArgument("--migrate-credentials", "--creds-migration"))
 
     Dependencies.ConvertFromNuget(force, noInstall |> not, noAutoRestore |> not, credsMigrationMode)
@@ -280,7 +284,8 @@ let init (results : ParseResults<InitArgs>) =
     Dependencies.Init(Directory.GetCurrentDirectory())
 
 let clearCache (results : ParseResults<ClearCacheArgs>) =
-    Dependencies.ClearCache()
+    let clearLocal = results.Contains <@ ClearCacheArgs.ClearLocal @>
+    Dependencies.ClearCache(clearLocal)
 
 let install (results : ParseResults<_>) =
     let force = results.Contains <@ InstallArgs.Force @>
@@ -589,7 +594,7 @@ let fixNuspecs silent (results : ParseResults<_>) =
 let fixNuspec _silent (results : ParseResults<_>) =
     let fileString = results.GetResult <@ FixNuspecArgs.File @>
     let refFile = results.GetResult <@ FixNuspecArgs.ReferencesFile @>
-    let nuspecList = 
+    let nuspecList =
         fileString.Split([|';'|], StringSplitOptions.RemoveEmptyEntries)
         |> Array.map (fun s -> s.Trim())
         |> List.ofArray
@@ -695,10 +700,17 @@ let generateLoadScripts (results : ParseResults<GenerateLoadScriptsArgs>) =
 
     Dependencies.Locate().GenerateLoadScripts providedGroups providedFrameworks providedScriptTypes
 
+let info (results : ParseResults<InfoArgs>) =
+    if results.Contains <@ InfoArgs.Paket_Dependencies_Dir @> then
+        match Dependencies.TryLocate() with
+        | None -> ()
+        | Some deps -> tracefn "%s" deps.RootPath
+
 let generateNuspec (results:ParseResults<GenerateNuspecArgs>) =
     let projectFile = results.GetResult <@ GenerateNuspecArgs.Project @>
-    let dependencies = results.GetResult <@ GenerateNuspecArgs.DependenciesFile @>
+    let dependenciesPath = results.GetResult <@ GenerateNuspecArgs.DependenciesFile @>
     let output = defaultArg  (results.TryGetResult <@ GenerateNuspecArgs.Output @>) (Directory.GetCurrentDirectory())
+    let dependencies = DependenciesFile.ReadFromFile dependenciesPath
     let filename, nuspec = Nuspec.FromProject(projectFile,dependencies)
     let nuspecString = nuspec.ToString()
     File.WriteAllText (Path.Combine (output,filename), nuspecString)
@@ -729,6 +741,10 @@ let why (results: ParseResults<WhyArgs>) =
 
     Why.ohWhy(packageName, directDeps, lockFile, groupName, results.Parser.PrintUsage(), options)
 
+let waitForDebugger () =
+    while not(System.Diagnostics.Debugger.IsAttached) do
+        System.Threading.Thread.Sleep(100)
+
 let handleCommand silent command =
     match command with
     | Add r -> processCommand silent add r
@@ -747,7 +763,7 @@ let handleCommand silent command =
     | FindPackages r -> processCommand silent (findPackages silent) r
     | FindPackageVersions r -> processCommand silent findPackageVersions r
     | FixNuspec r ->
-        warnObsolete (ReplaceArgument("fix-nuspec", "fix-nuspecs"))
+        warnObsolete (ReplaceArgument("fix-nuspecs", "fix-nuspec"))
         processCommand silent (fixNuspec silent) r
     | FixNuspecs r -> processCommand silent (fixNuspecs silent) r
     | ShowInstalledPackages r -> processCommand silent showInstalledPackages r
@@ -755,11 +771,12 @@ let handleCommand silent command =
     | Pack r -> processCommand silent pack r
     | Push r -> processCommand silent (push AssemblyVersionInformation.AssemblyInformationalVersion) r
     | GenerateIncludeScripts r ->
-        warnObsolete (ReplaceArgument("generate-include-scripts", "generate-load-scripts"))
+        warnObsolete (ReplaceArgument("generate-load-scripts", "generate-include-scripts"))
         processCommand silent generateLoadScripts r
     | GenerateLoadScripts r -> processCommand silent generateLoadScripts r
     | GenerateNuspec r -> processCommand silent generateNuspec r
     | Why r -> processCommand silent why r
+    | Info r -> processCommand silent info r
     // global options; list here in order to maintain compiler warnings
     // in case of new subcommands added
     | Verbose
@@ -769,7 +786,12 @@ let handleCommand silent command =
     | Log_File _ -> failwithf "internal error: this code should never be reached."
 
 let main() =
+    let waitDebuggerEnvVar = Environment.GetEnvironmentVariable ("PAKET_WAIT_DEBUGGER")
+    if waitDebuggerEnvVar = "1" then
+        waitForDebugger()
+
     let resolution = Environment.GetEnvironmentVariable ("PAKET_DISABLE_RUNTIME_RESOLUTION")
+    Logging.verboseWarnings <- Environment.GetEnvironmentVariable "PAKET_DETAILED_WARNINGS" = "true"
     if System.String.IsNullOrEmpty resolution then
         Environment.SetEnvironmentVariable ("PAKET_DISABLE_RUNTIME_RESOLUTION", "true")
     use consoleTrace = Logging.event.Publish |> Observable.subscribe Logging.traceToConsole
@@ -793,6 +815,7 @@ let main() =
 
         if results.Contains <@ Verbose @> then
             Logging.verbose <- true
+            Logging.verboseWarnings <- true
 
         let version = results.Contains <@ Version @>
         if not version then
@@ -805,11 +828,7 @@ let main() =
             handleCommand silent (results.GetSubCommand())
     with
     | exn when not (exn :? System.NullReferenceException) ->
-#if NETCOREAPP1_0
-        // Environment.ExitCode not supported
-#else
         Environment.ExitCode <- 1
-#endif
         traceErrorfn "Paket failed with"
         if Environment.GetEnvironmentVariable "PAKET_DETAILED_ERRORS" = "true" then
             printErrorExt true true false exn

@@ -16,12 +16,12 @@ open System.Xml
 let fakeUrl = "http://doesntmatter"
 
 let parseList fileName =
-    System.Environment.CurrentDirectory <- Path.GetDirectoryName __SOURCE_DIRECTORY__
+    use _cd = TestHelpers.changeWorkingDir (Path.GetDirectoryName __SOURCE_DIRECTORY__)
     let doc = XmlDocument()
     doc.Load (fileName:string)
     parseODataListDetails("tenp",fakeUrl,PackageName "package",SemVer.Parse "0",doc)
 let parseEntry fileName =
-    System.Environment.CurrentDirectory <- Path.GetDirectoryName __SOURCE_DIRECTORY__
+    use _cd = TestHelpers.changeWorkingDir (Path.GetDirectoryName __SOURCE_DIRECTORY__)
     let doc = XmlDocument()
     doc.Load (fileName:string)
     parseODataEntryDetails("tenp",fakeUrl,PackageName "package",SemVer.Parse "0",doc)
@@ -148,28 +148,6 @@ let ``can detect explicit dependencies for Microsoft.AspNet.WebApi.Client``() =
         (PackageName "Microsoft.Net.Http", DependenciesFileParser.parseVersionRequirement(">= 2.2.22"), 
             FrameworkRestriction.And [getPortableRestriction("portable-net45+win8+wp8+wp81+wpa81"); FrameworkRestriction.NotAtLeast(DotNetFramework(FrameworkVersion.V4_5))]
             |> ExplicitRestriction)
-
-[<Test>]
-let ``can detect explicit dependencies for WindowsAzure.Storage``() = 
-    let odata = parseList "NuGetOData/WindowsAzure.Storage.xml" |> ODataSearchResult.get
-    odata.PackageName |> shouldEqual "WindowsAzure.Storage"
-    odata.DownloadUrl |> shouldEqual"https://www.nuget.org/api/v2/package/WindowsAzure.Storage/4.4.1-preview"
-    let dependencies = odata|> NuGet.NuGetPackageCache.getDependencies |> Array.ofList
-    dependencies.[0] |> shouldEqual 
-        (PackageName "Microsoft.Data.OData", DependenciesFileParser.parseVersionRequirement(">= 5.6.3"), 
-           makeOrList [FrameworkRestriction.AtLeast(DNXCore(FrameworkVersion.V5_0))])
-
-    let vr,pr = 
-        match DependenciesFileParser.parseVersionRequirement(">= 4.0.0-beta-22231") with
-        | VersionRequirement(vr,pr) -> vr,pr
-
-    dependencies.[18] |> shouldEqual 
-        (PackageName "System.Net.Http", VersionRequirement(vr,PreReleaseStatus.All), 
-           makeOrList [FrameworkRestriction.AtLeast(DNXCore(FrameworkVersion.V5_0))])
-
-    dependencies.[44] |> shouldEqual 
-        (PackageName "Newtonsoft.Json", DependenciesFileParser.parseVersionRequirement(">= 6.0.8"), 
-            makeOrList [FrameworkRestriction.AtLeast(WindowsPhone WindowsPhoneVersion.V8); FrameworkRestriction.AtLeast(DotNetFramework(FrameworkVersion.V4))])
 
 [<Test>]
 let ``can ignore unknown frameworks``() = 

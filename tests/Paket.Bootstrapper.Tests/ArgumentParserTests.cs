@@ -44,7 +44,7 @@ namespace Paket.Bootstrapper.Tests
 
             public Stream CreateFile(string tmpFile)
             {
-                throw new NotImplementedException();
+                return new MemoryStream();
             }
 
             public string GetLocalFileVersion(string filename)
@@ -106,6 +106,15 @@ namespace Paket.Bootstrapper.Tests
                 return Path.Combine(rootDir, "temp");
             }
 
+            public Stream CreateExclusive(string path)
+            {
+                return new MemoryStream();
+            }
+
+            public void WaitForFileFinished(string path)
+            {
+            }
+
             public IEnumerable<string> ReadAllLines(string filename)
             {
                 return Enumerable.Empty<string>();
@@ -113,7 +122,7 @@ namespace Paket.Bootstrapper.Tests
 
             public Stream OpenRead(string filename)
             {
-                return Stream.Null;
+                return new MemoryStream();
             }
 
             public string GetCurrentDirectory()
@@ -421,6 +430,35 @@ namespace Paket.Bootstrapper.Tests
 
             //assert
             Assert.That(result.DownloadArguments.LatestVersion, Is.EqualTo("1.0"));
+        }
+
+        [Test]
+        public void LatestVersion_FromEnvironmentVariablePosix()
+        {
+            //arrange
+            var envVariables= new Dictionary<string, string>();
+            envVariables.Add(ArgumentParser.EnvArgs.PaketVersionEnvPosix, "1.0");
+
+            //act
+            var result = Parse(new string[] {}, null, envVariables);
+
+            //assert
+            Assert.That(result.DownloadArguments.LatestVersion, Is.EqualTo("1.0"));
+        }
+
+        [Test]
+        public void LatestVersion_Set_Both_FromEnvironmentVariable_Posix_Wins()
+        {
+            //arrange
+            var envVariables= new Dictionary<string, string>();
+            envVariables.Add(ArgumentParser.EnvArgs.PaketVersionEnv, "1.0");
+            envVariables.Add(ArgumentParser.EnvArgs.PaketVersionEnvPosix, "2.0");
+
+            //act
+            var result = Parse(new string[] {}, null, envVariables);
+
+            //assert
+            Assert.That(result.DownloadArguments.LatestVersion, Is.EqualTo("2.0"));
         }
 
         [Test]

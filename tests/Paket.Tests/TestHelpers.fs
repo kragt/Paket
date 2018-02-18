@@ -38,7 +38,7 @@ let GraphOfNuspecs (g:seq<string>) : DependencyGraph =
   g
   |> Seq.map (fun nuspecText ->
     let nspec = Nuspec.Load("in-memory", nuspecText)
-    nspec.OfficialName, nspec.Version, nspec.Dependencies |> List.map (fun (a,b,c) -> a.CompareString, b, c), RuntimeGraph.Empty)
+    nspec.OfficialName, nspec.Version, nspec.Dependencies.Value |> List.map (fun (a,b,c) -> a.CompareString, b, c), RuntimeGraph.Empty)
   |> Seq.toList
 
 let OfGraphWithRuntimeDeps (g:seq<string * string * (string * VersionRequirement) list * RuntimeGraph>) : DependencyGraph =
@@ -90,13 +90,13 @@ let safeResolve graph (dependencies : (string * VersionRange) list)  =
     let sources = [ PackageSource.NuGetV2Source "" ]
     let packages = 
         dependencies
-        |> List.map (fun (n, v) -> 
+        |> List.mapi (fun i (n, v) -> 
                { Name = PackageName n
                  VersionRequirement = VersionRequirement(v, PreReleaseStatus.No)
-                 Parent = PackageRequirementSource.DependenciesFile ""
+                 Parent = PackageRequirementSource.DependenciesFile("",i)
                  Graph = Set.empty
                  Sources = sources
-                 IsCliTool = false
+                 Kind = PackageRequirementKind.Package
                  TransitivePrereleases = false
                  Settings = InstallSettings.Default
                  ResolverStrategyForDirectDependencies = Some ResolverStrategy.Max 
@@ -144,3 +144,14 @@ let toPath elems = System.IO.Path.Combine(elems |> Seq.toArray)
 let ensureDir () = System.Environment.CurrentDirectory <-  NUnit.Framework.TestContext.CurrentContext.TestDirectory
 
 let printSqs sqs = sqs |> Seq.iter (printfn "%A")
+
+let changeWorkingDir newPath =
+    let oldPath = System.Environment.CurrentDirectory
+    System.Environment.CurrentDirectory <- newPath
+    { new IDisposable with
+        member x.Dispose() = 
+            System.Environment.CurrentDirectory <- oldPath
+    }
+
+[<AttributeUsage(AttributeTargets.Method, AllowMultiple=false)>]
+type FlakyAttribute() = inherit NUnit.Framework.CategoryAttribute()

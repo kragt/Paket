@@ -66,6 +66,10 @@ module LockFileSerializer =
         | Some x -> yield "IMPORT-TARGETS: " + x.ToString().ToUpper()
         | None -> ()
 
+        match options.Settings.LicenseDownload with
+        | Some x -> yield "LICENSE-DOWNLOAD: " + x.ToString().ToUpper()
+        | None -> ()
+
         match options.Settings.OmitContent with
         | Some ContentCopySettings.Omit -> yield "CONTENT: NONE"
         | Some ContentCopySettings.Overwrite -> yield "CONTENT: TRUE"
@@ -124,10 +128,10 @@ module LockFileSerializer =
 
                       let s =
                         // add "clitool"
-                        match package.IsCliTool, settings.ToString().ToLower()  with
-                        | true, "" -> "clitool: true"
-                        | true, s -> s + ", clitool: true"
-                        | _, s -> s
+                        match package.Kind, settings.ToString().ToLower()  with
+                        | ResolvedPackageKind.DotnetCliTool, "" -> "clitool: true"
+                        | ResolvedPackageKind.DotnetCliTool, s -> s + ", clitool: true"
+                        | ResolvedPackageKind.Package, s -> s
 
                       let s =
                         // add "isRuntimeDependency"
@@ -253,6 +257,7 @@ module LockFileParser =
     | ReferencesMode of bool
     | OmitContent of ContentCopySettings
     | ImportTargets of bool
+    | LicenseDownload of bool
     | GenerateLoadScripts of bool option
     | FrameworkRestrictions of FrameworkRestrictions
     | CopyLocal of bool
@@ -296,6 +301,7 @@ module LockFileParser =
 
             InstallOption (StorageConfig setting)
         | _, String.RemovePrefix "IMPORT-TARGETS:" trimmed -> InstallOption(ImportTargets(trimmed.Trim() = "TRUE"))
+        | _, String.RemovePrefix "LICENSE-DOWNLOAD:" trimmed -> InstallOption(LicenseDownload(trimmed.Trim() = "TRUE"))
         | _, String.RemovePrefix "COPY-LOCAL:" trimmed -> InstallOption(CopyLocal(trimmed.Trim() = "TRUE"))
         | _, String.RemovePrefix "SPECIFIC-VERSION:" trimmed -> InstallOption(SpecificVersion(trimmed.Trim() = "TRUE"))
         | _, String.RemovePrefix "GENERATE-LOAD-SCRIPTS:" trimmed -> 
@@ -316,7 +322,7 @@ module LockFileParser =
                                             
             InstallOption (CopyContentToOutputDir setting)
         | _, String.RemovePrefix "FRAMEWORK:" trimmed -> InstallOption(FrameworkRestrictions(ExplicitRestriction (trimmed.Trim() |> Requirements.parseRestrictionsLegacy true |> fst)))
-        | _, String.RemovePrefix "RESTRICTION:" trimmed -> InstallOption(FrameworkRestrictions(ExplicitRestriction (trimmed.Trim() |> Requirements.parseRestrictions |> fst)))
+        | _, String.RemovePrefix "RESTRICTION:" trimmed -> InstallOption(FrameworkRestrictions(ExplicitRestriction (trimmed.Trim() |> Requirements.parseRestrictionsSimplified |> fst)))
         | _, String.RemovePrefix "CONDITION:" trimmed -> InstallOption(ReferenceCondition(trimmed.Trim().ToUpper()))
         | _, String.RemovePrefix "CONTENT:" trimmed -> 
             let setting =
@@ -358,9 +364,9 @@ module LockFileParser =
             let frameworkSettings =
                 if not (String.IsNullOrEmpty settingsPart) then
                     try
-                        InstallSettings.Parse(settingsPart)
+                        InstallSettings.Parse(true, settingsPart)
                     with
-                    | _ -> InstallSettings.Parse("framework: " + settingsPart) // backwards compatible
+                    | _ -> InstallSettings.Parse(true, "framework: " + settingsPart) // backwards compatible
                 else
                     InstallSettings.Default
             if namePart.Contains "(" then
@@ -386,6 +392,7 @@ module LockFileParser =
         | Redirects mode -> { currentGroup.Options with Redirects = mode }
         | StorageConfig mode -> { currentGroup.Options with Settings = { currentGroup.Options.Settings with StorageConfig = mode }}
         | ImportTargets mode -> { currentGroup.Options with Settings = { currentGroup.Options.Settings with ImportTargets = Some mode } } 
+        | LicenseDownload mode -> { currentGroup.Options with Settings = { currentGroup.Options.Settings with LicenseDownload = Some mode } } 
         | CopyLocal mode -> { currentGroup.Options with Settings = { currentGroup.Options.Settings with CopyLocal = Some mode }}
         | SpecificVersion mode -> { currentGroup.Options with Settings = { currentGroup.Options.Settings with SpecificVersion = Some mode }}
         | CopyContentToOutputDir mode -> { currentGroup.Options with Settings = { currentGroup.Options.Settings with CopyContentToOutputDirectory = Some mode }}
@@ -409,13 +416,13 @@ module LockFileParser =
                 else
                     parts.[1]
 
-            let isCliTool, optionsString =
+            let kind, optionsString =
                 if optionsString.EndsWith ", clitool: true" then
-                    true,optionsString.Replace(", clitool: true","")
+                    ResolvedPackageKind.DotnetCliTool,optionsString.Replace(", clitool: true","")
                 elif optionsString.EndsWith "clitool: true" then
-                    true,optionsString.Replace("clitool: true","")
+                    ResolvedPackageKind.DotnetCliTool,optionsString.Replace("clitool: true","")
                 else
-                    false,optionsString
+                    ResolvedPackageKind.Package,optionsString
 
             let isRuntimeDependency, optionsString =
                 if optionsString.EndsWith ", isRuntimeDependency: true" then
@@ -425,7 +432,7 @@ module LockFileParser =
                     true, ""
                 else false, optionsString
 
-            parts.[0],isCliTool,isRuntimeDependency,InstallSettings.Parse(optionsString)
+            parts.[0],kind,isRuntimeDependency,InstallSettings.Parse(true, optionsString)
 
         ([{ GroupName = Constants.MainDependencyGroup; RepositoryType = None; RemoteUrl = None; Packages = []; SourceFiles = []; Options = InstallOptions.Default; LastWasPackage = false }], lockFileLines)
         ||> Seq.fold(fun state line ->
@@ -460,7 +467,7 @@ module LockFileParser =
                 | NugetPackage details ->
                     match currentGroup.RemoteUrl with
                     | Some remote -> 
-                        let package,isCliTool,isRuntimeDependency,settings = parsePackage details
+                        let package,kind,isRuntimeDependency,settings = parsePackage details
                         let parts' = package.Split ' '
                         let version = 
                             if parts'.Length < 2 then
@@ -476,7 +483,7 @@ module LockFileParser =
                                       Unlisted = false
                                       Settings = settings
                                       Version = SemVer.Parse version
-                                      IsCliTool = isCliTool
+                                      Kind = kind
                                       // TODO: write stuff into the lockfile and read it here
                                       IsRuntimeDependency = isRuntimeDependency } :: currentGroup.Packages }::otherGroups
                     | None -> failwith "no source has been specified."
@@ -693,6 +700,19 @@ type LockFile (fileName:string, groups: Map<GroupName,LockFileGroup>) =
         | Some v -> Some(allDependenciesOf v.Name)
         | None -> None
 
+
+    member this.ResolveFrameworksForScriptGeneration () = lazy (
+        this.Groups
+        |> Seq.map (fun f -> f.Value.Options.Settings.FrameworkRestrictions)
+        |> Seq.map(fun restrictions ->
+            match restrictions with
+            | Paket.Requirements.AutoDetectFramework -> failwithf "couldn't detect framework"
+            | Paket.Requirements.ExplicitRestriction list ->
+                list.RepresentedFrameworks |> Seq.choose (function TargetProfile.SinglePlatform tf -> Some tf | _ -> None)
+          )
+        |> Seq.concat
+    )
+
     /// Gets only direct dependencies of the given package in the given group.
     member this.GetDirectDependenciesOfSafe(groupName:GroupName,package,context) =
         let group = groups.[groupName]
@@ -812,7 +832,7 @@ type LockFile (fileName:string, groups: Map<GroupName,LockFileGroup>) =
             LockFile(lockFileName, groups)
         with
         | exn ->
-            raise <| Exception (sprintf "Error during parsing of '%s'." lockFileName, exn)
+            raise (Exception (sprintf "Error during parsing of '%s'." lockFileName, exn))
 
     member this.GetPackageHull(referencesFile:ReferencesFile) =
         let usedPackages = Dictionary<_,_>()
@@ -832,18 +852,17 @@ type LockFile (fileName:string, groups: Map<GroupName,LockFileGroup>) =
                         usedPackages.Add(k,PackageInstallSettings.Default(p.ToString()))
 
         for g in referencesFile.Groups do
-            g.Value.NugetPackages
-            |> List.iter (fun package -> 
+            for package in g.Value.NugetPackages do
                 try
                     for d in this.GetAllDependenciesOf(g.Key,package.Name,referencesFile.FileName) do
                         let k = g.Key,d
                         if usedPackages.ContainsKey k |> not then
                             usedPackages.Add(k,package)
-                with exn -> raise <| Exception(sprintf "Error while getting all dependencies in '%s'" referencesFile.FileName, exn))
+                with exn -> raise (Exception(sprintf "Error while getting all dependencies in '%s'" referencesFile.FileName, exn))
 
         usedPackages
 
-    member this.GetRemoteReferencedPackages(referencesFile:ReferencesFile,installGroup:InstallGroup) =
+    member __.GetRemoteReferencedPackages(referencesFile:ReferencesFile,installGroup:InstallGroup) =
         [for r in installGroup.RemoteFiles do
             let lockGroup = findGroup referencesFile.FileName installGroup.Name
             let lockRemote = findRemoteFile referencesFile.FileName lockGroup.RemoteFiles r.Name
@@ -869,9 +888,10 @@ type LockFile (fileName:string, groups: Map<GroupName,LockFileGroup>) =
                     | Some p -> p
                     | None -> failwithf "Error for %s: Package %O was not found in group %O of the paket.lock file." referencesFile.FileName p.Name groupName
                 
-                if package.IsCliTool then
+                match package.Kind with
+                | ResolvedPackageKind.DotnetCliTool ->
                     cliTools := Set.add package !cliTools
-                else
+                | ResolvedPackageKind.Package ->
                     if usedPackageKeys.Contains k then
                         failwithf "Package %O is referenced more than once in %s within group %O." p.Name referencesFile.FileName groupName
                 
@@ -918,14 +938,13 @@ type LockFile (fileName:string, groups: Map<GroupName,LockFileGroup>) =
                     failwithf "Package %O is referenced more than once in %s within group %O." p.Name referencesFile.FileName groupName
                 usedPackages.Add(k,p)
 
-            g.NugetPackages
-            |> List.iter (fun package ->
+            for package in g.NugetPackages do
                 try
                     for d in this.GetAllDependenciesOf(groupName,package.Name,referencesFile.FileName) do
                         let k = groupName,d
                         if usedPackages.ContainsKey k |> not then
                             usedPackages.Add(k,package)
-                with exn -> raise <| Exception(sprintf "Error while getting all dependencies in '%s'" referencesFile.FileName, exn))
+                with exn -> raise (Exception(sprintf "Error while getting all dependencies in '%s'" referencesFile.FileName, exn))
         | None -> ()
 
         usedPackages
@@ -959,12 +978,16 @@ type LockFile (fileName:string, groups: Map<GroupName,LockFileGroup>) =
             match group.TryFind(packageName) with
             | None -> failwithf "Package %O is not installed in group %O." packageName groupName
             | Some resolvedPackage ->
-                let packageName = resolvedPackage.Name
                 let folder = resolvedPackage.Folder this.RootPath groupName
+                let kind =
+                    match resolvedPackage.Kind with
+                    | ResolvedPackageKind.Package -> InstallModelKind.Package
+                    | ResolvedPackageKind.DotnetCliTool -> InstallModelKind.DotnetCliTool
 
                 InstallModel.CreateFromContent(
-                    packageName, 
-                    resolvedPackage.Version, 
+                    resolvedPackage.Name, 
+                    resolvedPackage.Version,
+                    kind,
                     FrameworkRestriction.NoRestriction, 
                     NuGet.GetContent(folder).Force())
     

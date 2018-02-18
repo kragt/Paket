@@ -10,7 +10,6 @@ open Paket.PackageSources
 open System
 open Chessie.ErrorHandling
 open System.Reflection
-open System.Threading.Tasks
 
 /// Finds packages which would be affected by a restore, i.e. not extracted yet or with the wrong version
 let FindPackagesNotExtractedYet(dependenciesFileName) =
@@ -29,24 +28,23 @@ let FindPackagesNotExtractedYet(dependenciesFileName) =
 
 
 let CopyToCaches force caches fileName =
-    caches
-    |> Seq.iter (fun cache -> 
+    for cache in caches do
         try
             NuGetCache.CopyToCache(cache,fileName,force)
         with
         | exn ->
             if verbose then
-                traceWarnfn "Could not copy %s to cache %s%s%s" fileName cache.Location Environment.NewLine exn.Message)
+                traceWarnfn "Could not copy %s to cache %s%s%s" fileName cache.Location Environment.NewLine exn.Message
 
 /// returns - package, libs files, props files, targets files, analyzers files
-let private extractPackage caches (package:PackageInfo) alternativeProjectRoot root isLocalOverride source groupName version includeVersionInPath force =
+let private extractPackage caches (package:PackageInfo) alternativeProjectRoot root isLocalOverride source groupName version includeVersionInPath downloadLicense force =
     let downloadAndExtract force detailed = async {
         let cfg = defaultArg package.Settings.StorageConfig PackagesFolderGroupConfig.Default
 
         let! fileName,folder = 
             NuGet.DownloadAndExtractPackage(
-                alternativeProjectRoot, root, isLocalOverride, cfg, source, caches, groupName, 
-                package.Name, version, package.IsCliTool, includeVersionInPath, force, detailed)
+                alternativeProjectRoot, root, isLocalOverride, cfg, source, caches, groupName,
+                package.Name, version, package.Kind, includeVersionInPath, downloadLicense, force, detailed)
 
         CopyToCaches force caches fileName
         return package, NuGet.GetContent folder
@@ -73,6 +71,7 @@ let ExtractPackage(alternativeProjectRoot, root, groupName, sources, caches, for
         let storage = defaultArg package.Settings.StorageConfig PackagesFolderGroupConfig.Default
         let v = package.Version
         let includeVersionInPath = defaultArg package.Settings.IncludeVersionInPath false
+        let downloadLicense = defaultArg package.Settings.LicenseDownload false
         let resolvedStorage = storage.Resolve root groupName package.Name package.Version includeVersionInPath
 
         let targetDir, overridenFile, force =
@@ -82,7 +81,7 @@ let ExtractPackage(alternativeProjectRoot, root, groupName, sources, caches, for
                 targetDir, overridenFile, (if (localOverride || overridenFile.Exists) then true else force)
             | None ->
                 if localOverride then
-                    failwithf "Local package override without local storage (global nuget folder) is not supported at the moment. A PR is welcome."
+                    failwithf "Local package override without local storage (global NuGet folder) is not supported at the moment."
                 let targetDir = NuGetCache.GetTargetUserFolder package.Name package.Version
                 let overridenFile = FileInfo(Path.Combine(targetDir, "paket.overriden"))
                 targetDir, overridenFile, force
@@ -107,10 +106,10 @@ let ExtractPackage(alternativeProjectRoot, root, groupName, sources, caches, for
                     | None -> failwithf "The NuGet source %s for package %O was not found in the paket.dependencies file with sources %A" package.Source.Url package.Name sources
                     | Some s -> s 
 
-                return! extractPackage caches package alternativeProjectRoot root localOverride source groupName v includeVersionInPath force
+                return! extractPackage caches package alternativeProjectRoot root localOverride source groupName v includeVersionInPath downloadLicense force
 
             | LocalNuGet(path,_) as source ->
-                return! extractPackage caches package alternativeProjectRoot root localOverride source groupName v includeVersionInPath force
+                return! extractPackage caches package alternativeProjectRoot root localOverride source groupName v includeVersionInPath downloadLicense force
         }
 
         // manipulate overridenFile after package extraction
@@ -128,10 +127,17 @@ let internal restore (alternativeProjectRoot, root, groupName, sources, caches, 
     async { 
         RemoteDownload.DownloadSourceFiles(Path.GetDirectoryName lockFile.FileName, groupName, force, lockFile.Groups.[groupName].RemoteFiles)
         let group = lockFile.Groups.[groupName]
-        let! _ = 
+        let tasks =
             lockFile.Groups.[groupName].Resolution
             |> Map.filter (fun name _ -> packages.Contains name)
             |> Seq.map (fun kv -> ExtractPackage(alternativeProjectRoot, root, groupName, sources, caches, force, group.GetPackage kv.Key, Set.contains kv.Key overriden))
+            |> Seq.splitInto 5
+            |> Seq.map (fun tasks -> async { 
+                for t in tasks do 
+                    let! _ = t
+                    () })
+        let! _ =
+            tasks
             |> Async.Parallel
         return ()
     }
@@ -148,9 +154,9 @@ let findAllReferencesFiles root =
         match p.FindReferencesFile() with
         | Some fileName -> 
             try
-                Some(ok <| (p, ReferencesFile.FromFile fileName))
+                Some(ok (p, ReferencesFile.FromFile fileName))
             with e ->
-                Some(fail <| (ReferencesFileParseError (FileInfo fileName, e)))
+                Some(fail (ReferencesFileParseError (FileInfo fileName, e)))
         | None ->
             None
             
@@ -160,19 +166,30 @@ let findAllReferencesFiles root =
 
 let copiedElements = ref false
 
+type private MyAssemblyFinder () = class end
 let extractElement root name =
-    let a = Assembly.GetEntryAssembly()
+    let a = typeof<MyAssemblyFinder>.GetTypeInfo().Assembly
     let s = a.GetManifestResourceStream name
+    if isNull s then failwithf "Resource stream '%s' could not be found in the Paket.Core assembly" name
     let targetFile = FileInfo(Path.Combine(root,".paket",name))
     if not targetFile.Directory.Exists then
         targetFile.Directory.Create()
+
+    use sr = new StreamReader(s)
     
-    use fileStream = File.Create(targetFile.FullName)
     s.Seek(int64 0, SeekOrigin.Begin) |> ignore
-    s.CopyTo(fileStream)
+    s.Flush()
+    let newContent = sr.ReadToEnd()
+    let oldContent = 
+        if targetFile.Exists then
+            File.ReadAllText targetFile.FullName
+        else
+            ""
+    if newContent <> oldContent then
+        File.WriteAllText(targetFile.FullName,newContent)
     targetFile.FullName
 
-let extractBuildTask root =
+let extractRestoreTargets root =
     if !copiedElements then
         Path.Combine(root,".paket","Paket.Restore.targets")
     else
@@ -183,10 +200,15 @@ let extractBuildTask root =
 let CreateInstallModel(alternativeProjectRoot, root, groupName, sources, caches, force, package) =
     async {
         let! (package, content) = ExtractPackage(alternativeProjectRoot, root, groupName, sources, caches, force, package, false)
+        let kind =
+            match package.Kind with
+            | ResolvedPackageKind.Package -> InstallModelKind.Package
+            | ResolvedPackageKind.DotnetCliTool -> InstallModelKind.DotnetCliTool
         let model = 
                 InstallModel.CreateFromContent(
                     package.Name, 
                     package.Version, 
+                    kind,
                     Requirements.getExplicitRestriction package.Settings.FrameworkRestrictions, 
                     content.Force())
         return (groupName,package.Name), (package,model)
@@ -206,36 +228,45 @@ let createAlternativeNuGetConfig (projectFile:FileInfo) =
      <clear />
   </disabledPackageSources>
 </configuration>"""
-    if not alternativeConfigFileInfo.Exists || File.ReadAllText(alternativeConfigFileInfo.FullName) <> config then 
-        File.WriteAllText(alternativeConfigFileInfo.FullName,config)
 
-let createPaketPropsFile (cliTools:ResolvedPackage seq) (fileInfo:FileInfo) =
-    if Seq.isEmpty cliTools then
-        if fileInfo.Exists then 
-            File.Delete(fileInfo.FullName)
-    else
-        let cliParts =
+    if not alternativeConfigFileInfo.Exists || File.ReadAllText(alternativeConfigFileInfo.FullName) <> config then 
+        File.WriteAllText(alternativeConfigFileInfo.FullName,config) 
+        if verbose then
+            tracefn " - %s created" alternativeConfigFileInfo.FullName
+
+let createPaketPropsFile (cliTools:ResolvedPackage seq) restoreSuccess (fileInfo:FileInfo) =
+    let cliParts =
+        if Seq.isEmpty cliTools then
+            ""
+        else
             cliTools
             |> Seq.map (fun cliTool -> sprintf """        <DotNetCliToolReference Include="%O" Version="%O" />""" cliTool.Name cliTool.Version)
+            |> fun xs -> String.Join(Environment.NewLine,xs)
+            |> fun s -> "    <ItemGroup>" + Environment.NewLine + s + Environment.NewLine + "    </ItemGroup>"
+
             
-        let content = 
-            sprintf """<?xml version="1.0" encoding="utf-8" standalone="no"?>
+    let content = 
+        sprintf """<?xml version="1.0" encoding="utf-8" standalone="no"?>
 <Project ToolsVersion="14.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
     <PropertyGroup>
         <MSBuildAllProjects>$(MSBuildAllProjects);$(MSBuildThisFileFullPath)</MSBuildAllProjects>
+        %s
     </PropertyGroup>
-    <ItemGroup>
 %s
-    </ItemGroup>
 </Project>""" 
-             (String.Join(Environment.NewLine,cliParts))
+            (if restoreSuccess then 
+                "<!-- <RestoreSuccess>False</RestoreSuccess> -->" 
+             else 
+                "<RestoreSuccess>False</RestoreSuccess>")
+            cliParts
 
-        if not fileInfo.Exists || File.ReadAllText(fileInfo.FullName) <> content then 
-            File.WriteAllText(fileInfo.FullName,content)
+    if not fileInfo.Exists || File.ReadAllText(fileInfo.FullName) <> content then 
+        File.WriteAllText(fileInfo.FullName,content)
+        if verbose then
             tracefn " - %s created" fileInfo.FullName
-        else
-            if verbose then
-                tracefn " - %s already up-to-date" fileInfo.FullName
+    else
+        if verbose then
+            tracefn " - %s already up-to-date" fileInfo.FullName
 
 let createPaketCLIToolsFile (cliTools:ResolvedPackage seq) (fileInfo:FileInfo) =
     if Seq.isEmpty cliTools then
@@ -252,10 +283,13 @@ let createPaketCLIToolsFile (cliTools:ResolvedPackage seq) (fileInfo:FileInfo) =
 
         if not fileInfo.Exists || File.ReadAllText(fileInfo.FullName) <> content then 
             File.WriteAllText(fileInfo.FullName,content)
-            tracefn " - %s created" fileInfo.FullName
+            if verbose then
+                tracefn " - %s created" fileInfo.FullName
         else
             if verbose then
                 tracefn " - %s already up-to-date" fileInfo.FullName
+
+let ImplicitPackages = [PackageName "NETStandard.Library"]  |> Set.ofList
 
 let createProjectReferencesFiles (lockFile:LockFile) (projectFile:ProjectFile) (referencesFile:ReferencesFile) (resolved:Lazy<Map<GroupName*PackageName,PackageInfo>>) (groups:Map<GroupName,LockFileGroup>) =
     let projectFileInfo = FileInfo projectFile.FileName
@@ -267,9 +301,13 @@ let createProjectReferencesFiles (lockFile:LockFile) (projectFile:ProjectFile) (
         |> dict
 
     let targets =
-        ProjectFile.getTargetFramework projectFile
-        |> Option.toList
-        |> List.append (ProjectFile.getTargetFrameworks projectFile |> Option.toList |> List.collect (fun item -> String.split [|';'|] item |> List.ofArray))
+        let monikers =
+            ProjectFile.getTargetFramework projectFile
+            |> Option.toList
+            |> List.append (ProjectFile.getTargetFrameworks projectFile |> Option.toList)
+       
+        monikers
+        |> List.collect (fun item -> item.Split([|';'|],StringSplitOptions.RemoveEmptyEntries) |> Array.map (fun x -> x.Trim()) |> List.ofArray)
         |> List.map (fun s -> s, (PlatformMatching.forceExtractPlatforms s |> fun p -> p.ToTargetProfile true))
         |> List.choose (fun (s, c) -> c |> Option.map (fun d -> s, d))
 
@@ -277,8 +315,8 @@ let createProjectReferencesFiles (lockFile:LockFile) (projectFile:ProjectFile) (
     // scenario: remove a target framework -> change references -> add back target framework
     // -> We reached an invalid state
     let objDir = DirectoryInfo(Path.Combine(projectFileInfo.Directory.FullName,"obj"))
-    objDir.GetFiles(sprintf "%s*.paket.resolved" projectFileInfo.Name)
-        |> Seq.iter (fun f -> f.Delete())
+    for f in objDir.GetFiles(sprintf "%s*.paket.resolved" projectFileInfo.Name) do
+        try f.Delete() with | _ -> ()
 
     // fable 1.0 compat
     let oldReferencesFile = FileInfo(Path.Combine(projectFileInfo.Directory.FullName,"obj",projectFileInfo.Name + ".references"))
@@ -294,23 +332,28 @@ let createProjectReferencesFiles (lockFile:LockFile) (projectFile:ProjectFile) (
                 | None -> Set.empty
 
             for (key,_,_) in hull do
+                let resolvedPackage = resolved.Force().[key]
                 let restore =
-                    let resolvedPackage = resolved.Force().[key]
-
-                    match resolvedPackage.Settings.FrameworkRestrictions with
-                    | Requirements.ExplicitRestriction restrictions ->
-                        Requirements.isTargetMatchingRestrictions(restrictions, targetProfile)
-                    | _ -> true
+                    not (ImplicitPackages.Contains resolvedPackage.Name) &&
+                        match resolvedPackage.Settings.FrameworkRestrictions with
+                        | Requirements.ExplicitRestriction restrictions ->
+                            Requirements.isTargetMatchingRestrictions(restrictions, targetProfile)
+                        | _ -> true
 
                 if restore then
                     let _,packageName = key
                     let direct = allDirectPackages.Contains packageName
                     let package = resolved.Force().[key]
+                    let copy_local =
+                        match resolvedPackage.Settings.CopyLocal with
+                        | Some x -> x.ToString()
+                        | None -> "false"
                     let line =
                         packageName.ToString() + "," +
                         package.Version.ToString() + "," +
                         (if direct then "Direct" else "Transitive") + "," +
-                        kv.Key.ToString()
+                        kv.Key.ToString() + "," +
+                        copy_local
 
                     list.Add line
 
@@ -320,25 +363,25 @@ let createProjectReferencesFiles (lockFile:LockFile) (projectFile:ProjectFile) (
             newFileName.Directory.Create()
 
         elif not newFileName.Exists || File.ReadAllText(newFileName.FullName) <> output then
-            if not (File.Exists(oldReferencesFile.FullName)) || targetProfile = SinglePlatform (FrameworkIdentifier.DotNetStandard DotNetStandardVersion.V1_6) then
+            if not (File.Exists(oldReferencesFile.FullName)) || targetProfile = TargetProfile.SinglePlatform (FrameworkIdentifier.DotNetStandard DotNetStandardVersion.V1_6) then
                 // compat with old targets and fable - always write but prefer netstandard16.
                 File.WriteAllText(oldReferencesFile.FullName,output)
             File.WriteAllText(newFileName.FullName,output)
-            tracefn " - %s created" newFileName.FullName
+            if verbose then
+                tracefn " - %s created" newFileName.FullName
         else
             if verbose then
                 tracefn " - %s already up-to-date" newFileName.FullName
 
     let cliTools = System.Collections.Generic.List<_>()
     for kv in groups do
-        let _,cliToolsInGroup = hulls.[kv.Key] // lockFile.GetOrderedPackageHull(kv.Key,referencesFile)
+        let _,cliToolsInGroup = hulls.[kv.Key]
         cliTools.AddRange cliToolsInGroup
 
     let paketCLIToolsFileName = FileInfo(Path.Combine(projectFileInfo.Directory.FullName,"obj",projectFileInfo.Name + ".paket.clitools"))
     createPaketCLIToolsFile cliTools paketCLIToolsFileName
-
-    let paketPropsFileName = FileInfo(Path.Combine(projectFileInfo.Directory.FullName,"obj",projectFileInfo.Name + ".paket.props"))
-    createPaketPropsFile cliTools paketPropsFileName
+    
+    createPaketPropsFile cliTools true (ProjectFile.getPaketPropsFileInfo projectFileInfo)
 
     // Write "cached" file, this way msbuild can check if the references file has changed.
     let paketCachedReferencesFileName = FileInfo(Path.Combine(projectFileInfo.Directory.FullName,"obj",projectFileInfo.Name + ".paket.references.cached"))
@@ -348,7 +391,7 @@ let createProjectReferencesFiles (lockFile:LockFile) (projectFile:ProjectFile) (
         // it can happen that the references file doesn't exist if paket doesn't find one in that case we update the cache by deleting it.
         if paketCachedReferencesFileName.Exists then paketCachedReferencesFileName.Delete()
 
-let CreateScriptsForGroups dependenciesFile lockFile (groups:Map<GroupName,LockFileGroup>) =
+let CreateScriptsForGroups (lockFile:LockFile) (groups:Map<GroupName,LockFileGroup>) =
     let groupsToGenerate =
         groups
         |> Seq.map (fun kvp -> kvp.Value)
@@ -357,14 +400,14 @@ let CreateScriptsForGroups dependenciesFile lockFile (groups:Map<GroupName,LockF
         |> Seq.toList
 
     if not (List.isEmpty groupsToGenerate) then
-        let depsCache = DependencyCache(dependenciesFile,lockFile)
-        let dir = DirectoryInfo dependenciesFile.Directory
+        let depsCache = DependencyCache(lockFile)
+        let rootPath = DirectoryInfo lockFile.RootPath
 
-        LoadingScripts.ScriptGeneration.constructScriptsFromData depsCache groupsToGenerate [] []
-        |> Seq.iter (fun sd -> sd.Save dir)
+        let scripts = LoadingScripts.ScriptGeneration.constructScriptsFromData depsCache groupsToGenerate [] []
+        for sd in scripts do
+            sd.Save rootPath
 
 let FindOrCreateReferencesFile (projectFile:ProjectFile) =
-    
     match projectFile.FindReferencesFile() with
     | Some fileName -> 
         try
@@ -406,6 +449,7 @@ let Restore(dependenciesFileName,projectFile,force,group,referencesFileNames,ign
             let oldContents = File.ReadAllText(restoreCacheFile)
             oldContents = newContents
         else false
+
     let lockFile,localFile,hasLocalFile =
         let lockFile = LockFile.LoadFrom(lockFileName.FullName)
         if not localFileName.Exists then
@@ -417,9 +461,11 @@ let Restore(dependenciesFileName,projectFile,force,group,referencesFileNames,ign
             LocalFile.overrideLockFile localFile lockFile,localFile,true
 
     if not (hasLocalFile || force) && isEarlyExit () then
-        tracefn "Last restore is still up to date."
+        if verbose then
+            tracefn "Last restore is still up to date."
     else
-        let dependenciesFile = DependenciesFile.ReadFromFile(dependenciesFileName)
+        if projectFile = None then
+            extractRestoreTargets root |> ignore
 
         let targetFilter = 
             targetFrameworks
@@ -427,10 +473,12 @@ let Restore(dependenciesFileName,projectFile,force,group,referencesFileNames,ign
                 s.Split([|';'|], StringSplitOptions.RemoveEmptyEntries)
                 |> Array.map (fun s -> s.Trim())
                 |> Array.choose FrameworkDetection.Extract)
+        
+        
+        let dependenciesFile = DependenciesFile.ReadFromFile(dependenciesFileName)
 
         if not hasLocalFile && not ignoreChecks then
             let hasAnyChanges,nugetChanges,remoteFilechanges,hasChanges = DependencyChangeDetection.GetChanges(dependenciesFile,lockFile,false)
-
             let checkResponse = if failOnChecks then failwithf else traceWarnfn
             if hasAnyChanges then 
                 checkResponse "paket.dependencies and paket.lock are out of sync in %s.%sPlease run 'paket install' or 'paket update' to recompute the paket.lock file." lockFileName.Directory.FullName Environment.NewLine
@@ -458,13 +506,14 @@ let Restore(dependenciesFileName,projectFile,force,group,referencesFileNames,ign
 
                 [referencesFile.FileName]
             | None ->
-                if referencesFileNames = [] then
+                if referencesFileNames = [] && group = None then
                     // Restore all projects
-                    ProjectFile.FindAllProjects root
-                    |> Seq.filter (fun proj -> proj.GetToolsVersion() >= 15.0)
-                    |> Seq.iter (fun proj ->
-                        RestoreNewSdkProject lockFile resolved groups proj
-                        |> ignore)
+                    let allProjects =
+                        ProjectFile.FindAllProjects root
+                        |> Seq.filter (fun proj -> proj.GetToolsVersion() >= 15.0)
+
+                    for proj in allProjects do
+                        RestoreNewSdkProject lockFile resolved groups proj |> ignore
 
                 referencesFileNames
 
@@ -492,7 +541,7 @@ let Restore(dependenciesFileName,projectFile,force,group,referencesFileNames,ign
                             match resolvedPackage.Settings.FrameworkRestrictions with
                             | Requirements.ExplicitRestriction restrictions ->
                                 targets
-                                |> Array.exists (fun target -> Requirements.isTargetMatchingRestrictions(restrictions, SinglePlatform target))
+                                |> Array.exists (fun target -> Requirements.isTargetMatchingRestrictions(restrictions, TargetProfile.SinglePlatform target))
                             | _ -> true)
  
 
@@ -520,6 +569,6 @@ let Restore(dependenciesFileName,projectFile,force,group,referencesFileNames,ign
                     |> Async.RunSynchronously
                     |> ignore
 
-                CreateScriptsForGroups dependenciesFile lockFile groups
+                CreateScriptsForGroups lockFile groups
                 if isFullRestore then
                     File.WriteAllText(restoreCacheFile, newContents)))

@@ -21,7 +21,6 @@ open System.Threading.Tasks
 open System.Collections.Concurrent
 
 #if !NETSTANDARD1_6
-// TODO: Activate this in .NETCore 2.0
 ServicePointManager.SecurityProtocol <- unbox 192 ||| unbox 768 ||| unbox 3072 ||| unbox 48
                                         ///SecurityProtocolType.Tls ||| SecurityProtocolType.Tls11 ||| SecurityProtocolType.Tls12 ||| SecurityProtocolType.Ssl3
 #endif
@@ -30,7 +29,7 @@ let sndOf3 (_,v,_) = v
 let thirdOf3 (_,_,v) = v
 
 let rethrowf f inner fmt =
-    ksprintf (fun msg -> raise <| f(msg,inner)) fmt
+    ksprintf (fun msg -> raise (f(msg,inner))) fmt
 
 /// Adds quotes around the string
 /// [omit]
@@ -48,18 +47,25 @@ let inline force (lz: 'a Lazy)  = lz.Force()
 let inline endsWith text x = (^a:(member EndsWith:string->bool)x, text) 
 let inline toLower str = (^a:(member ToLower:unit->string)str)
 
+let internal removeInvalidChars (str : string) = RegularExpressions.Regex.Replace(str, "[:@\,]", "_")
+
 
 let inline tryGet (key:^k) this =
     let mutable v = Unchecked.defaultof<'v>
     let scc = ( ^a : (member TryGetValue : 'k * ('v byref) -> bool) this, key, &v)
     if scc then Some v else None
 
-let internal removeInvalidChars (str : string) = RegularExpressions.Regex.Replace(str, "[:@\,]", "_")
+let inline internal memoizeByExt (getKey : 'a -> 'key) (f: 'a -> 'b) : ('a -> 'b) * ('key * 'b -> unit) =
+    let cache = System.Collections.Concurrent.ConcurrentDictionary<'key, 'b>()
+    (fun (x: 'a) ->
+        cache.GetOrAdd(getKey x, fun _ -> f x)),
+    (fun (key, c) ->
+        cache.TryAdd(key, c) |> ignore)
 
-let internal memoize (f: 'a -> 'b) : 'a -> 'b =
-    let cache = System.Collections.Concurrent.ConcurrentDictionary<'a, 'b>()
-    fun (x: 'a) ->
-        cache.GetOrAdd(x, f)
+let inline internal memoizeBy (getKey : 'a -> 'key) (f: 'a -> 'b) : ('a -> 'b) =
+    memoizeByExt getKey f |> fst
+
+let inline internal memoize (f: 'a -> 'b) : 'a -> 'b = memoizeBy id f
 
 type MemoizeAsyncExResult<'TResult, 'TCached> =
     | FirstCall of ( 'TCached * 'TResult ) Task
@@ -112,11 +118,11 @@ let internal parseAuthTypeString (str:string) =
 let TimeSpanToReadableString(span:TimeSpan) =
     let pluralize x = if x = 1 then String.Empty else "s"
     let notZero x y = if x > 0 then y else String.Empty
-    let days = notZero (span.Duration().Days)  <| String.Format("{0:0} day{1}, ", span.Days, pluralize span.Days)
-    let hours = notZero (span.Duration().Hours) <| String.Format("{0:0} hour{1}, ", span.Hours, pluralize span.Hours) 
-    let minutes = notZero (span.Duration().Minutes) <| String.Format("{0:0} minute{1}, ", span.Minutes, pluralize span.Minutes)
-    let seconds = notZero (span.Duration().Seconds) <| String.Format("{0:0} second{1}", span.Seconds, pluralize span.Seconds) 
-    let milliseconds = notZero (span.Duration().Milliseconds) <| String.Format("{0:0} millisecond{1}", span.Milliseconds, pluralize span.Milliseconds) 
+    let days = notZero (span.Duration().Days) (String.Format("{0:0} day{1}, ", span.Days, pluralize span.Days))
+    let hours = notZero (span.Duration().Hours) (String.Format("{0:0} hour{1}, ", span.Hours, pluralize span.Hours))
+    let minutes = notZero (span.Duration().Minutes) (String.Format("{0:0} minute{1}, ", span.Minutes, pluralize span.Minutes))
+    let seconds = notZero (span.Duration().Seconds) (String.Format("{0:0} second{1}", span.Seconds, pluralize span.Seconds))
+    let milliseconds = notZero (span.Duration().Milliseconds) (String.Format("{0:0} millisecond{1}", span.Milliseconds, pluralize span.Milliseconds) )
 
     let formatted = String.Format("{0}{1}{2}{3}", days, hours, minutes, seconds)
 
@@ -188,7 +194,10 @@ let rec emptyDir (dirInfo:DirectoryInfo) =
             fileInfo.Delete()
 
         for childInfo in dirInfo.GetDirectories() do
-            deleteDir childInfo
+            try
+                Directory.Delete(childInfo.FullName,true)
+            with
+            | _ -> deleteDir childInfo
 
         dirInfo.Attributes <- FileAttributes.Normal
 
@@ -262,7 +271,7 @@ let isMonoRuntime =
 
 /// Determines if the current system is an Unix system
 let isUnix = 
-#if NETSTANDARD1_6
+#if NETSTANDARD1_6 || NETSTANDARD2_0
     System.Runtime.InteropServices.RuntimeInformation.IsOSPlatform(
         System.Runtime.InteropServices.OSPlatform.Linux) || 
     System.Runtime.InteropServices.RuntimeInformation.IsOSPlatform(
@@ -273,7 +282,7 @@ let isUnix =
 
 /// Determines if the current system is a MacOs system
 let isMacOS =
-#if NETSTANDARD1_6
+#if NETSTANDARD1_6 || NETSTANDARD2_0
     System.Runtime.InteropServices.RuntimeInformation.IsOSPlatform(
         System.Runtime.InteropServices.OSPlatform.OSX)
 #else
@@ -284,7 +293,7 @@ let isMacOS =
 
 /// Determines if the current system is a Linux system
 let isLinux = 
-#if NETSTANDARD1_6
+#if NETSTANDARD1_6 || NETSTANDARD2_0
     System.Runtime.InteropServices.RuntimeInformation.IsOSPlatform(
         System.Runtime.InteropServices.OSPlatform.Linux)
 #else
@@ -293,7 +302,7 @@ let isLinux =
 
 /// Determines if the current system is a Windows system
 let isWindows =
-#if NETSTANDARD1_6
+#if NETSTANDARD1_6 || NETSTANDARD2_0
     System.Runtime.InteropServices.RuntimeInformation.IsOSPlatform(
         System.Runtime.InteropServices.OSPlatform.Windows)
 #else
@@ -307,7 +316,7 @@ let isWindows =
 /// Todo: Detect mono on windows
 [<Obsolete("use either isMonoRuntime or isUnix, this flag is always false when compiled for NETSTANDARD")>]
 let isMono = 
-#if NETSTANDARD1_6
+#if NETSTANDARD1_6 || NETSTANDARD2_0
     false
 #else
     isUnix
@@ -371,7 +380,7 @@ let normalizeFeedUrl (source:string) =
     | "http://www.nuget.org/api/v2" -> Constants.DefaultNuGetStream.Replace("https","http")
     | source -> source
 
-#if NETSTANDARD1_6
+#if CUSTOM_WEBPROXY
 type WebProxy = IWebProxy
 #endif
 
@@ -398,11 +407,11 @@ let envProxies () =
         if isNull envVarValue then None else
         match Uri.TryCreate(envVarValue, UriKind.Absolute) with
         | true, envUri ->
-#if NETSTANDARD1_6
+#if CUSTOM_WEBPROXY
             Some 
                 { new IWebProxy with
                     member __.Credentials 
-                        with get () = (Option.toObj <| getCredentials envUri) :> ICredentials
+                        with get () = (Option.toObj (getCredentials envUri)) :> ICredentials
                         and set value = ()
                     member __.GetProxy _ =
                         Uri (sprintf "http://%s:%d" envUri.Host envUri.Port)
@@ -411,7 +420,7 @@ let envProxies () =
                 }
 #else
             let proxy = WebProxy (Uri (sprintf "http://%s:%d" envUri.Host envUri.Port))
-            proxy.Credentials <- Option.toObj <| getCredentials envUri
+            proxy.Credentials <- Option.toObj (getCredentials envUri)
             proxy.BypassProxyOnLocal <- true
             proxy.BypassList <- bypassList
             Some proxy
@@ -433,12 +442,19 @@ let getDefaultProxyFor =
       (fun (url:string) ->
             let uri = Uri url
             let getDefault () =
-#if NETSTANDARD1_6
-                let result = WebRequest.DefaultWebProxy
+#if CUSTOM_WEBPROXY
+                let result =
+                    { new IWebProxy with
+                        member __.Credentials 
+                            with get () = null
+                            and set _value = ()
+                        member __.GetProxy _ = null
+                        member __.IsBypassed (_host : Uri) = true
+                    }
 #else
                 let result = WebRequest.GetSystemWebProxy()
 #endif
-#if NETSTANDARD1_6
+#if CUSTOM_WEBPROXY
                 let proxy = result
 #else
                 let address = result.GetProxy uri
@@ -464,7 +480,7 @@ type RequestFailedInfo =
         if not (isNull resp.Content) then
             do! resp.Content.CopyToAsync(mem) |> Async.AwaitTaskWithoutAggregate
         mem.Position <- 0L
-        //raise <| RequestReturnedError(resp.StatusCode, mem, resp.Content.Headers.ContentType.MediaType)
+
         let mediaType =
             resp.Content
             |> Option.ofObj
@@ -504,8 +520,32 @@ let failIfNoSuccess (resp:HttpResponseMessage) = async {
         if verbose then
             tracefn "Request failed with '%d': '%s'" (int resp.StatusCode) (resp.RequestMessage.RequestUri.ToString())
         let! info = RequestFailedInfo.ofResponse resp
-        raise <| RequestFailedException(info, null)
+        raise (RequestFailedException(info, null))
     () }
+
+let rec requestStatus (ex:Exception) = 
+    match ex with 
+    | null -> None
+    | :? RequestFailedException as rfex ->
+        match rfex.Info with 
+        | Some info -> Some info.StatusCode
+        | _ -> None 
+    | :? WebException as wfex -> 
+        match wfex.Response with
+        | :? HttpWebResponse as webresp -> 
+            Some webresp.StatusCode 
+        | _ -> None
+    | ex -> requestStatus ex.InnerException
+    
+// active pattern for nested HttpStatusCode
+let (|RequestStatus|_|) (ex:Object) =
+    match ex with
+    | :? Exception as except -> requestStatus except
+    | :? HttpWebResponse as resp -> Some resp.StatusCode 
+    | :? RequestFailedInfo as info -> Some info.StatusCode
+    | null -> None
+    | _ -> None
+         
 
 #if USE_WEB_CLIENT_FOR_UPLOAD
 type System.Net.WebClient with
@@ -695,7 +735,7 @@ let downloadFromUrlWithTimeout (auth:Auth option, url : string) (timeout:TimeSpa
             do! task
         with
         | exn ->
-            raise <| Exception(sprintf "Could not download from '%s'" url, exn)
+            raise (Exception(sprintf "Could not download from '%s'" url, exn))
     }
 
 /// [omit]
@@ -719,7 +759,7 @@ let getFromUrl (auth:Auth option, url : string, contentType : string) =
             return! client.DownloadStringTaskAsync (uri, tok) |> Async.AwaitTaskWithoutAggregate
         with
         | exn ->
-            return raise <| Exception(sprintf "Could not retrieve data from '%s'" url, exn)
+            return raise (Exception(sprintf "Could not retrieve data from '%s'" url, exn))
 
     }
 
@@ -739,7 +779,7 @@ let getXmlFromUrl (auth:Auth option, url : string) =
             return! client.DownloadStringTaskAsync (Uri url, tok) |> Async.AwaitTaskWithoutAggregate
         with
         | exn ->
-            return raise <| Exception(sprintf "Could not retrieve data from '%s'" url, exn)
+            return raise (Exception(sprintf "Could not retrieve data from '%s'" url, exn))
     }
 
 type SafeWebResult<'a> =
@@ -761,8 +801,17 @@ module SafeWebResult =
         | UnknownError err -> FSharp.Core.Result.Error err
         | SuccessResponse s -> FSharp.Core.Result.Ok s
 
-/// [omit]
-let safeGetFromUrl (auth:Auth option, url : string, contentType : string) =
+let rec private _safeGetFromUrl (auth:Auth option, url : string, contentType : string, iTry, nTries) =
+    
+    let rec getExceptionNames (exn:Exception) = [
+        if exn <> null then
+            yield exn.GetType().Name
+            if exn.InnerException <> null then
+                yield! getExceptionNames exn.InnerException
+    ]
+
+    let shouldRetry exn = isMonoRuntime && iTry < nTries && (getExceptionNames exn |> List.contains "MonoBtlsException")
+    
     async {
         try
             let uri = Uri url
@@ -778,6 +827,13 @@ let safeGetFromUrl (auth:Auth option, url : string, contentType : string) =
             let! raw = client.DownloadStringTaskAsync(uri, tok) |> Async.AwaitTaskWithoutAggregate
             return SuccessResponse raw
         with
+
+        | exn when shouldRetry exn ->
+            raise (Exception("Hello from _safeGetFromUrl.shouldRetry", exn))
+            // there are issues with mono, try again :\
+            Logging.traceWarnfn "Request failed, this is likely due to a mono issue. Trying again, this was try %i/%i" iTry nTries
+            return! _safeGetFromUrl(auth, url, contentType, iTry + 1, nTries)
+
         | :? RequestFailedException as w ->
             match w.Info with
             | Some { StatusCode = HttpStatusCode.NotFound } -> return NotFound
@@ -786,7 +842,10 @@ let safeGetFromUrl (auth:Auth option, url : string, contentType : string) =
                     Logging.verbosefn "Error while retrieving '%s': %O" url w
                 return UnknownError (ExceptionDispatchInfo.Capture w)
     }
-
+    
+/// [omit]
+let safeGetFromUrl (auth:Auth option, url : string, contentType : string) = _safeGetFromUrl(auth, url, contentType, 1, 10)
+    
 let mutable autoAnswer = None
 let readAnswer() =
     match autoAnswer with
@@ -856,6 +915,8 @@ type PackagesFolderGroupConfig =
             let parent = Path.Combine(groupDir, packageFolder)
             ResolvedPackagesFolder.ResolvedFolder parent
     static member Default = DefaultPackagesFolder
+
+
 let RunInLockedAccessMode(rootFolder,action) =
     let paketFilesFolder = Path.Combine(rootFolder,Constants.PaketFilesFolderName)
     if Directory.Exists paketFilesFolder |> not then
@@ -897,7 +958,7 @@ let RunInLockedAccessMode(rootFolder,action) =
                 tracefn "Could not acquire lock to %s.%s%s%sTrials left: %d." fileName Environment.NewLine exn.Message Environment.NewLine trials
                 acquireLock startTime timeOut trials
             else
-                raise <| Exception(sprintf "Could not acquire lock to '%s'." fileName, exn)
+                raise (Exception(sprintf "Could not acquire lock to '%s'." fileName, exn))
     
     let rec releaseLock() =
         try
@@ -1041,7 +1102,7 @@ let parseKeyValuePairs (s:string) : Dictionary<string,string> =
         d
     with
     | exn -> 
-        raise <| Exception(sprintf "Could not parse '%s' as key/value pairs." s, exn)
+        raise (Exception(sprintf "Could not parse '%s' as key/value pairs." s, exn))
 
 let downloadStringSync (url : string) (client : HttpClient) = 
     try 

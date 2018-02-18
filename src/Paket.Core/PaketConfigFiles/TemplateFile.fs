@@ -63,7 +63,7 @@ module private TemplateParser =
                 inner { state with Line = state.Line + 1; Remaining = t }
             | comment when Comment comment ->
                 inner { state with Line = state.Line + 1; Remaining = t }
-            | Indented _ -> Choice2Of2 <| sprintf "Indented block with no name line %d" state.Line
+            | Indented _ -> Choice2Of2 (sprintf "Indented block with no name line %d" state.Line)
             | MultiToken (key, value) ->
                 inner { state with
                             Remaining = t
@@ -72,14 +72,14 @@ module private TemplateParser =
             | SingleToken key ->
                 let value, line, remaining = indentedBlock [] state.Line t
                 if value = "" then
-                    Choice2Of2 <| sprintf "No indented block following name '%s' line %d" key line
+                    Choice2Of2 (sprintf "No indented block following name '%s' line %d" key line)
                 else
                     inner { state with
                                 Remaining = remaining
                                 Map = Map.add key (value.TrimEnd()) state.Map
                                 Line = line }
             | _ ->
-                Choice2Of2 <| sprintf "Invalid syntax line %d" state.Line
+                Choice2Of2 (sprintf "Invalid syntax line %d" state.Line)
 
     let parse (contents : string) =
         let contents = contents.Replace("\r\n","\n").Replace("\r","\n")
@@ -237,7 +237,7 @@ module internal TemplateFile =
             | ProjectInfo(core, optional) -> ProjectInfo(core, { optional with ProjectUrl = Some url })
         { templateFile with Contents = contents }
 
-    let private failP file str = fail <| PackagingConfigParseError(file,str)
+    let private failP file str = fail (PackagingConfigParseError(file,str))
 
     type private PackageConfigType =
         | FileType
@@ -271,7 +271,11 @@ module internal TemplateFile =
 
     let private (|Framework|_|) (line:string) =        
         match line.Trim()  with
-        | String.RemovePrefix "framework:" _ as trimmed -> Some (FrameworkDetection.Extract(trimmed.Replace("framework: ","")))
+        | String.RemovePrefix "framework:" trimmed ->
+            match FrameworkDetection.Extract trimmed with
+            | Some _ as fw -> Some fw
+            | None ->
+                failwithf "Unable to identify a framework from '%s'" trimmed
         | _ -> None
 
     let private (|Empty|_|) (line:string) =
@@ -296,6 +300,18 @@ module internal TemplateFile =
                         | None -> failwithf "The template file %s contains the placeholder CURRENTVERSION, but no version was given." fileName
 
                 elif s.Contains "LOCKEDVERSION" then
+                    let groupRegex = Regex("LOCKEDVERSION-(?<group>\w+)")
+                    let replaceGroup (m : Match) =
+                        let groupName = GroupName m.Groups.["group"].Value
+                        match lockFile.Groups |> Map.tryFind groupName with
+                        | None -> failwithf "The template file %s contains the placeholder LOCKEDVERSION-%O, but no group %O was found in paket.lock" fileName groupName groupName
+                        | Some gp ->
+                            match gp.Resolution |> Map.tryFind name with
+                            | None -> failwithf "The template file %s contains the placeholder LOCKEDVERSION-%O, but no version was given for package %O in group %O in paket.lock" fileName groupName name groupName
+                            | Some p -> string p.Version
+
+                    let s = groupRegex.Replace(s, replaceGroup)
+
                     match lockFile.Groups.[Constants.MainDependencyGroup].Resolution |> Map.tryFind name with
                     | Some p -> s.Replace("LOCKEDVERSION", string p.Version)
                     | None ->

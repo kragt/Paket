@@ -59,7 +59,8 @@ type ProjectOutputType =
 | Exe 
 | Library
 
-type ProjectLanguage = Unknown | CSharp | FSharp | VisualBasic | WiX | Nemerle | CPP
+[<RequireQualifiedAccess>]
+type ProjectLanguage = Unknown | CSharp | FSharp | VisualBasic | WiX | Nemerle | CPP | IronPython | ServiceFabric
 
 module LanguageEvaluation =
     let private extractProjectTypeGuids (projectDocument:XmlDocument) =
@@ -104,27 +105,42 @@ module LanguageEvaluation =
         [
             "{EDCC3B85-0BAD-11DB-BC1A-00112FDE8B61}" // Nemerle
         ] |> List.map Guid.Parse |> Set.ofList
+    
+    let private ironPythonGuids =
+        [
+            "{D499C55F-46C0-4FE1-8D05-02605C1891EA}" // IronPython
+        ] |> List.map Guid.Parse |> Set.ofList
+
+    let private serviceFabric =
+        [
+            "{e1296024-58b6-4e25-843e-b9faa9b07be6}" // ServiceFabric
+        ] |> List.map Guid.Parse |> Set.ofList
 
     let private getGuidLanguage (guid:Guid) = 
         let isCsharp = csharpGuids.Contains(guid)
         let isVb = vbGuids.Contains(guid)
         let isFsharp = fsharpGuids.Contains(guid)
         let isNemerle = nemerleGuids.Contains(guid)
+        let isIronPython = ironPythonGuids.Contains(guid)
+        let isServiceFabric = serviceFabric.Contains(guid)
 
-        match (isCsharp, isVb, isFsharp, isNemerle) with
-        | (true, false, false, false) -> Some CSharp
-        | (false, true, false, false) -> Some VisualBasic
-        | (false, false, true, false) -> Some FSharp
-        | (false, false, false, true) -> Some Nemerle
+        match (isCsharp, isVb, isFsharp, isNemerle, isIronPython) with
+        | (true, false, false, false, false) -> Some ProjectLanguage.CSharp
+        | (false, true, false, false, false) -> Some ProjectLanguage.VisualBasic
+        | (false, false, true, false, false) -> Some ProjectLanguage.FSharp
+        | (false, false, false, true, false) -> Some ProjectLanguage.Nemerle
+        | (false, false, false, false, true) -> Some ProjectLanguage.IronPython
         | _ -> None
 
     let private getLanguageFromExtension = function
-        | ".csproj" -> Some CSharp
-        | ".vbproj" -> Some VisualBasic
-        | ".fsproj" -> Some FSharp
-        | ".vcxproj" -> Some CPP
-        | ".wixproj" -> Some WiX
-        | ".nproj"  -> Some Nemerle
+        | ".csproj" -> Some ProjectLanguage.CSharp
+        | ".vbproj" -> Some ProjectLanguage.VisualBasic
+        | ".fsproj" -> Some ProjectLanguage.FSharp
+        | ".vcxproj" -> Some ProjectLanguage.CPP
+        | ".wixproj" -> Some ProjectLanguage.WiX
+        | ".nproj"  -> Some ProjectLanguage.Nemerle
+        | ".pyproj"  -> Some ProjectLanguage.IronPython
+        | ".sfproj"  -> Some ProjectLanguage.ServiceFabric
         | _ -> None
 
     let private getLanguageFromFileName (fileName : string) =
@@ -146,7 +162,7 @@ module LanguageEvaluation =
 
         match languageGroups with
         | [language] -> language
-        | _ -> Unknown
+        | _ -> ProjectLanguage.Unknown
 
 /// Contains methods to read and manipulate project files.
 type ProjectFile = 
@@ -163,7 +179,7 @@ type ProjectFile =
 
 [<CompilationRepresentation(CompilationRepresentationFlags.ModuleSuffix)>]
 module ProjectFile =
-    let supportedEndings = [ ".csproj"; ".fsproj"; ".vbproj"; ".wixproj"; ".nproj"; ".vcxproj"]
+    let supportedEndings = [ ".csproj"; ".fsproj"; ".vbproj"; ".wixproj"; ".nproj"; ".vcxproj"; ".pyproj"; ".sfproj"]
 
     let isSupportedFile (fi:FileInfo) =
         supportedEndings
@@ -250,6 +266,7 @@ module ProjectFile =
                 "MSBuildThisFileFullPath", projectFileInfo.FullName
                 "MSBuildThisFileName", Path.GetFileNameWithoutExtension(projectFileInfo.FullName)
             ] |> Map.ofList
+
         match projectFile.DefaultProperties with
         | Some p -> p
         | None ->
@@ -387,7 +404,7 @@ module ProjectFile =
                     | None, true -> None
                     | None, false -> Some(data)
                     | Some(left, comp, right, index), _ ->
-                        let data = Some <| data @[(andOr, left, comp, right)]
+                        let data = Some (data @[(andOr, left, comp, right)])
                         parseFullCondition data sb input index
 
         let rec handleConditions data xs lastCondition =
@@ -813,7 +830,7 @@ module ProjectFile =
                         let duplicates = HashSet<_>()
                         for frameworkAssembly in frameworkReferences do
                             for t in libFolder.Targets do
-                                if not <| usedFrameworkLibs.Add(t,frameworkAssembly.Name) then
+                                if not (usedFrameworkLibs.Add(t,frameworkAssembly.Name)) then
                                     assemblyTargets := Set.remove t !assemblyTargets // List.filter ((<>) t) !assemblyTargets
                                     duplicates.Add frameworkAssembly.Name |> ignore
 
@@ -854,30 +871,31 @@ module ProjectFile =
                 let containsReferences = ref false
                 let containsReferences2 = ref false
 
-                conditions
-                |> List.map (fun (condition,itemGroup,ownNode) ->
-                    let condition = 
-                        match condition with
-                        | "$(TargetFrameworkIdentifier) == 'true'" -> "true"
-                        | _ -> condition
+                let nodes =
+                    conditions
+                    |> List.map (fun (condition,itemGroup,ownNode) ->
+                        let condition = 
+                            match condition with
+                            | "$(TargetFrameworkIdentifier) == 'true'" -> "true"
+                            | _ -> condition
 
-                    let whenNode = 
-                        createNode "When" project
-                        |> addAttribute "Condition" condition 
+                        let whenNode = 
+                            createNode "When" project
+                            |> addAttribute "Condition" condition 
                
-                    if not itemGroup.IsEmpty then
-                        whenNode.AppendChild itemGroup |> ignore
-                        if ownNode then
-                            containsReferences2 := true
-                        else
-                            containsReferences := true
-                    whenNode,ownNode)
-                |> List.iter (fun (node,ownNode) -> 
+                        if not itemGroup.IsEmpty then
+                            whenNode.AppendChild itemGroup |> ignore
+                            if ownNode then
+                                containsReferences2 := true
+                            else
+                                containsReferences := true
+                        whenNode,ownNode)
+
+                for node,ownNode in nodes do
                     if ownNode then
                         chooseNode2.AppendChild node |> ignore
                     else
                         chooseNode.AppendChild node |> ignore
-                    )
                                 
                 match !containsReferences,!containsReferences2 with
                 | true,true -> [chooseNode2; chooseNode] 
@@ -895,17 +913,19 @@ module ProjectFile =
                 let propertyChooseNode = createNode "Choose" project
 
                 let containsProperties = ref false
-                frameworkSpecificTargetsFileConditions
-                |> List.map (fun (condition,(propertyNames,propertyGroup)) ->
-                    let finalCondition = if condition = "" || condition.Length > 3000 || condition = "$(TargetFrameworkIdentifier) == 'true'" then "1 == 1" else condition
-                    let whenNode = 
-                        createNode "When" project
-                        |> addAttribute "Condition" finalCondition 
-                    if not <| Set.isEmpty propertyNames then
-                        whenNode.AppendChild(propertyGroup) |> ignore
-                        containsProperties := true
-                    whenNode)
-                |> List.iter(fun node -> propertyChooseNode.AppendChild node |> ignore)
+                let nodes =
+                    frameworkSpecificTargetsFileConditions
+                    |> List.map (fun (condition,(propertyNames,propertyGroup)) ->
+                        let finalCondition = if condition = "" || condition.Length > 3000 || condition = "$(TargetFrameworkIdentifier) == 'true'" then "1 == 1" else condition
+                        let whenNode = 
+                            createNode "When" project
+                            |> addAttribute "Condition" finalCondition 
+                        if not (Set.isEmpty propertyNames) then
+                            whenNode.AppendChild(propertyGroup) |> ignore
+                            containsProperties := true
+                        whenNode)
+                for node in nodes do
+                    propertyChooseNode.AppendChild node |> ignore
                 
                 (frameworkSpecificTargetsFileConditions |> List.map (fun (_,(propertyNames,_)) -> propertyNames)),
                 (if !containsProperties then propertyChooseNode else createNode "Choose" project)
@@ -1028,36 +1048,66 @@ module ProjectFile =
     let getTargetFramework (project:ProjectFile) = getProperty "TargetFramework" project
     let getTargetFrameworks (project:ProjectFile) = getProperty "TargetFrameworks" project
 
-    let getTargetProfile (project:ProjectFile) =
+    let getToolsVersion (project:ProjectFile) =
+        let adjustIfWeHaveSDK v =
+            try
+                let sdkAttr = project.ProjectNode.Attributes.["Sdk"]
+                if isNull sdkAttr || String.IsNullOrWhiteSpace sdkAttr.Value
+                then v   // adjustment so paket still installs to old style msbuild projects that are using MSBuild15 but not the new format
+                else 15.0
+            with
+            | _ -> v
+
+        match project.ProjectNode.Attributes.["ToolsVersion"] with
+        | null -> adjustIfWeHaveSDK 4.0
+        | v ->
+            match Double.TryParse(v.Value, NumberStyles.Any, CultureInfo.InvariantCulture) with
+            | true , 15.0 ->
+                    let sdkAttr = project.ProjectNode.Attributes.["Sdk"]
+                    if  isNull sdkAttr || String.IsNullOrWhiteSpace sdkAttr.Value
+                    then 14.0   // adjustment so paket still installs to old style msbuild projects that are using MSBuild15 but not the new format
+                    else 15.0
+            | true,  version -> adjustIfWeHaveSDK version
+            | _         -> adjustIfWeHaveSDK 4.0
+
+    let getTargetProfiles (project:ProjectFile) =
         let fallback () =
-            let prefix =
+            let prefix() =
                 match getTargetFrameworkIdentifier project with
                 | None -> "net"
                 | Some x -> x
-            let framework = 
+
+            let frameworks = 
                 match getTargetFrameworkVersion project with
-                | None -> getTargetFramework project
-                | Some x -> Some(prefix + x.Replace("v",""))
-            let defaultResult = SinglePlatform (DotNetFramework FrameworkVersion.V4)
-            match framework with
-            | None -> defaultResult
-            | Some s ->
-                match FrameworkDetection.Extract(s) with
-                | None -> defaultResult
-                | Some x -> SinglePlatform x
+                | None -> 
+                    let xs = 
+                        getTargetFrameworks project 
+                        |> Option.map (fun x -> x.Split([|';'|],StringSplitOptions.RemoveEmptyEntries))
+                        |> Option.toArray
+                        |> Array.concat
+                        |> Array.map (fun x -> x.Trim())
+                        |> Seq.toList
+                    (getTargetFramework project |> Option.toList) @ xs
+                    
+                | Some x -> [prefix() + (x.Replace("v",""))]
+
+            match frameworks |> List.choose (fun s -> FrameworkDetection.Extract s |> Option.map TargetProfile.SinglePlatform) with
+            | [] -> [TargetProfile.SinglePlatform (DotNetFramework FrameworkVersion.V4)]
+            | xs -> xs
+            
 
         match getTargetFrameworkProfile project with
         | Some profile when profile = "Unity Web v3.5" ->
-            SinglePlatform (DotNetUnity DotNetUnityVersion.V3_5_Web)
+            [TargetProfile.SinglePlatform (DotNetUnity DotNetUnityVersion.V3_5_Web)]
         | Some profile when profile = "Unity Micro v3.5" ->
-            SinglePlatform (DotNetUnity DotNetUnityVersion.V3_5_Micro)
+            [TargetProfile.SinglePlatform (DotNetUnity DotNetUnityVersion.V3_5_Micro)]
         | Some profile when profile = "Unity Subset v3.5" ->
-            SinglePlatform (DotNetUnity DotNetUnityVersion.V3_5_Subset)
+            [TargetProfile.SinglePlatform (DotNetUnity DotNetUnityVersion.V3_5_Subset)]
         | Some profile when profile = "Unity Full v3.5" ->
-            SinglePlatform (DotNetUnity DotNetUnityVersion.V3_5_Full)
+            [TargetProfile.SinglePlatform (DotNetUnity DotNetUnityVersion.V3_5_Full)]
         | Some profile when String.IsNullOrWhiteSpace profile |> not ->
             try
-                KnownTargetProfiles.FindPortableProfile profile
+                [KnownTargetProfiles.FindPortableProfile profile]
             with e ->
                 traceWarnfn "Could not detect TargetFrameworkProfile '%s' in '%s' via 'FindPortableProfile', using fallback" profile project.FileName
                 fallback()
@@ -1126,49 +1176,53 @@ module ProjectFile =
             completeModel
             |> Map.filter (fun kv _ -> usedPackages.ContainsKey kv)
         
-        filteredModel
-        |> Seq.map (fun kv -> 
-                deleteCustomModelNodes (snd kv.Value) project
-                let installSettings = snd usedPackages.[kv.Key]
-                let restrictionList = 
-                    installSettings.FrameworkRestrictions 
-                    |> getExplicitRestriction
+        let contexts =
+            filteredModel
+            |> Seq.map (fun kv -> 
+                    deleteCustomModelNodes (snd kv.Value) project
+                    let installSettings = snd usedPackages.[kv.Key]
+                    let restrictionList = 
+                        installSettings.FrameworkRestrictions 
+                        |> getExplicitRestriction
 
-                let projectModel =
-                    (snd kv.Value)
-                        .ApplyFrameworkRestrictions(restrictionList)
-                        .FilterExcludes(installSettings.Excludes)
-                        .RemoveIfCompletelyEmpty()
+                    let projectModel =
+                        (snd kv.Value)
+                            .ApplyFrameworkRestrictions(restrictionList)
+                            .FilterExcludes(installSettings.Excludes)
+                            .RemoveIfCompletelyEmpty()
 
-                let _, packageName = kv.Key
-                if specialPackagesWithFrameworkConflictLibs.Contains packageName then
-                    for t in KnownTargetProfiles.AllProfiles do
-                        if (projectModel.GetLibReferenceFiles t) 
-                           |> Seq.exists (fun t -> t.Name = packageName.ToString() + ".dll") 
-                        then
-                            usedFrameworkLibs.Add(t,packageName.ToString()) |> ignore
+                    let _, packageName = kv.Key
+                    if specialPackagesWithFrameworkConflictLibs.Contains packageName then
+                        for t in KnownTargetProfiles.AllProfiles do
+                            if (projectModel.GetLibReferenceFiles t) 
+                               |> Seq.exists (fun t -> t.Name = packageName.ToString() + ".dll") 
+                            then
+                                usedFrameworkLibs.Add(t,packageName.ToString()) |> ignore
 
-                kv,installSettings,restrictionList,projectModel)
-        |> Seq.sortBy (fun (kv,_,_,_) -> 
-                let group, packName = kv.Key
-                group.CompareString, packName.CompareString)
-        |> Seq.map (fun (kv,installSettings,restrictionList,projectModel) ->
-            if directPackages.ContainsKey kv.Key then
-                let targetProfile = getTargetProfile project 
-                if isTargetMatchingRestrictions(restrictionList,targetProfile) then
-                    if projectModel.GetLibReferenceFiles targetProfile |> Seq.isEmpty then
-                        let libReferences = 
-                            projectModel.GetAllLegacyReferences() 
+                    kv,installSettings,restrictionList,projectModel)
+            |> Seq.sortBy (fun (kv,_,_,_) -> 
+                    let group, packName = kv.Key
+                    group.CompareString, packName.CompareString)
+            |> Seq.map (fun (kv,installSettings,restrictionList,projectModel) ->
+                if directPackages.ContainsKey kv.Key then
+                    let targetProfiles = getTargetProfiles project
+                    targetProfiles
+                    |> Seq.filter (fun targetProfile -> isTargetMatchingRestrictions(restrictionList,targetProfile))
+                    |> Seq.filter (projectModel.GetLibReferenceFiles >> Seq.isEmpty)
+                    |> Seq.iter (fun targetProfile ->
+                            let libReferences = 
+                                projectModel.GetAllLegacyReferences() 
 
-                        if not (Seq.isEmpty libReferences) then
-                            traceWarnfn "Package %O contains libraries, but not for the selected TargetFramework %O in project %s."
-                                (snd kv.Key) targetProfile project.FileName
+                            if not (Seq.isEmpty libReferences) then
+                                traceWarnfn "Package %O contains libraries, but not for the selected TargetFramework %O in project %s."
+                                    (snd kv.Key) targetProfile project.FileName)
 
-            let importTargets = defaultArg installSettings.ImportTargets true
+                let importTargets = defaultArg installSettings.ImportTargets true
             
-            let allFrameworks = applyRestrictionsToTargets restrictionList KnownTargetProfiles.AllProfiles
-            generateXml projectModel usedFrameworkLibs installSettings.Aliases installSettings.CopyLocal installSettings.SpecificVersion importTargets installSettings.ReferenceCondition (set allFrameworks) project)
-        |> Seq.iter (fun ctx ->
+                let allFrameworks = applyRestrictionsToTargets restrictionList KnownTargetProfiles.AllProfiles
+                generateXml projectModel usedFrameworkLibs installSettings.Aliases installSettings.CopyLocal installSettings.SpecificVersion importTargets installSettings.ReferenceCondition (set allFrameworks) project)
+
+        for ctx in contexts do
             for chooseNode in ctx.ChooseNodes do
                 let i = ref (project.ProjectNode.ChildNodes.Count-1)
                 while 
@@ -1187,47 +1241,45 @@ module ProjectFile =
                         project.ProjectNode.InsertAfter(chooseNode,node) |> ignore
 
                 // global props are inserted at the top of the file
-                ctx.GlobalPropsNodes
-                |> Seq.iter (project.ProjectNode.PrependChild >> ignore)
+                for node in ctx.GlobalPropsNodes do
+                    project.ProjectNode.PrependChild node |> ignore
 
                 // global targets are just inserted at the end of the file
-                ctx.GlobalTargetsNodes
-                |> Seq.iter (project.ProjectNode.AppendChild >> ignore)
+                for node in ctx.GlobalTargetsNodes do
+                    project.ProjectNode.AppendChild node |> ignore
 
                 // framework specific props/targets reference specific msbuild properties, so they need to be inserted later
                 let iProp,iTarget = findInsertSpot()
 
                 let addProps() =
                     if iProp = 0 then
-                        ctx.FrameworkSpecificPropsNodes
-                        |> Seq.iter (project.ProjectNode.PrependChild >> ignore)
+                        for node in ctx.FrameworkSpecificPropsNodes do
+                            project.ProjectNode.PrependChild node |> ignore
                     else
-                        ctx.FrameworkSpecificPropsNodes
-                        |> Seq.iter (fun n -> project.ProjectNode.InsertAfter(n,project.ProjectNode.ChildNodes.[iProp-1]) |> ignore)
+                        for node in ctx.FrameworkSpecificPropsNodes do
+                            project.ProjectNode.InsertAfter(node,project.ProjectNode.ChildNodes.[iProp-1]) |> ignore
             
                 if ctx.FrameworkSpecificPropertyChooseNode.ChildNodes.Count > 0 then
                     if iTarget = 0 then
                         project.ProjectNode.AppendChild ctx.FrameworkSpecificPropertyChooseNode |> ignore
 
-                        ctx.FrameworkSpecificPropsNodes
-                        |> Seq.iter (project.ProjectNode.AppendChild >> ignore)
+                        for node in ctx.FrameworkSpecificPropsNodes do
+                            project.ProjectNode.AppendChild node |> ignore
                     else
                         let node = project.ProjectNode.ChildNodes.[iTarget-1]
                     
-                        ctx.FrameworkSpecificPropsNodes
-                        |> Seq.iter (fun n -> project.ProjectNode.InsertAfter(n,node) |> ignore)
+                        for n in ctx.FrameworkSpecificPropsNodes do
+                            project.ProjectNode.InsertAfter(n,node) |> ignore
 
                         project.ProjectNode.InsertAfter(ctx.FrameworkSpecificPropertyChooseNode,node) |> ignore
                 else
                    addProps()
 
-                ctx.FrameworkSpecificTargetsNodes
-                |> Seq.iter (project.ProjectNode.AppendChild >> ignore)
+                for node in ctx.FrameworkSpecificTargetsNodes do
+                    project.ProjectNode.AppendChild node |> ignore
 
                 if ctx.AnalyzersNode.ChildNodes.Count > 0 then
                     project.ProjectNode.AppendChild ctx.AnalyzersNode |> ignore
-            )
-
 
     let save forceTouch project =
         let determineEncoding fileName =
@@ -1277,7 +1329,7 @@ module ProjectFile =
                 match node |> getAttribute "Include" with
                 | Some fileName ->
                     let fi = FileInfo(normalizePath fileName)
-                    Some <| fi.Name.Replace(fi.Extension,"")
+                    Some (fi.Name.Replace(fi.Extension,""))
                 | None -> None
 
         let forceGetInnerText node name =
@@ -1347,13 +1399,11 @@ module ProjectFile =
               |> List.tryFind (withAttributeValue "Name" "EnsureNuGetPackageBuildImports") ]
             |> List.choose id
         
-        toDelete
-        |> List.iter 
-            (fun node -> 
-                let parent = node.ParentNode
-                node.ParentNode.RemoveChild node |> ignore
-                if not parent.HasChildNodes then 
-                    parent.ParentNode.RemoveChild parent |> ignore)
+        for node in toDelete do
+            let parent = node.ParentNode
+            node.ParentNode.RemoveChild node |> ignore
+            if not parent.HasChildNodes then 
+                parent.ParentNode.RemoveChild parent |> ignore
 
     let removeNuGetPackageImportStamp project =
         let toDelete =
@@ -1361,13 +1411,11 @@ module ProjectFile =
             |> getDescendants "PropertyGroup" 
             |> List.collect (getDescendants "NuGetPackageImportStamp")
         
-        toDelete
-        |> List.iter 
-            (fun node -> 
-                let parent = node.ParentNode
-                node.ParentNode.RemoveChild node |> ignore
-                if not parent.HasChildNodes then 
-                    parent.ParentNode.RemoveChild parent |> ignore)
+        for node in toDelete do
+            let parent = node.ParentNode
+            node.ParentNode.RemoveChild node |> ignore
+            if not parent.HasChildNodes then 
+                parent.ParentNode.RemoveChild parent |> ignore
 
     let removeImportAndTargetEntries (packages : list<string * SemVerInfo> ) (project:ProjectFile) =
         let toDelete = 
@@ -1379,25 +1427,23 @@ module ProjectFile =
                     p.IndexOf(sprintf "%s.%O" id version, StringComparison.OrdinalIgnoreCase) >= 0)
                 | None -> false)
         
-        toDelete
-        |> List.iter
-            (fun node -> 
-                let sibling = node.NextSibling
-                tracefn "Removing 'Import' entry from %s for project %s" 
-                    project.FileName 
-                    (node |> getAttribute "Project" |> Option.get)
-                node.ParentNode.RemoveChild node |> ignore
-                match sibling with
-                | null -> ()
-                | sibling when sibling.Name.Equals "Target" ->
-                    let deleteTarget = 
-                        Utils.askYesNo
-                            (sprintf "Do you want to delete Target named '%s' from %s ?" 
-                                (sibling |> getAttribute "Name" |> Option.get)
-                                project.FileName)
-                    if deleteTarget then
-                        sibling.ParentNode.RemoveChild sibling |> ignore
-                | _ -> ())
+        for node in toDelete do
+            let sibling = node.NextSibling
+            tracefn "Removing 'Import' entry from %s for project %s" 
+                project.FileName 
+                (node |> getAttribute "Project" |> Option.get)
+            node.ParentNode.RemoveChild node |> ignore
+            match sibling with
+            | null -> ()
+            | sibling when sibling.Name.Equals "Target" ->
+                let deleteTarget = 
+                    Utils.askYesNo
+                        (sprintf "Do you want to delete Target named '%s' from %s ?" 
+                            (sibling |> getAttribute "Name" |> Option.get)
+                            project.FileName)
+                if deleteTarget then
+                    sibling.ParentNode.RemoveChild sibling |> ignore
+            | _ -> ()
     
     let packageReferencesNoPrivateAssets project =
         project.ProjectNode
@@ -1425,16 +1471,16 @@ module ProjectFile =
     let removePackageReferenceEntries project =
         let toDelete = packageReferencesNoPrivateAssets project
         
-        toDelete 
-        |> List.iter (fun node -> node.ParentNode.RemoveChild node |> ignore)
+        for node in toDelete do
+            node.ParentNode.RemoveChild node |> ignore
 
         deleteIfEmpty "ItemGroup" project |> ignore
 
     let removeCliToolReferenceEntries project =
         let toDelete = cliToolsNoPrivateAssets project
         
-        toDelete 
-        |> List.iter (fun node -> node.ParentNode.RemoveChild node |> ignore)
+        for node in toDelete do
+            node.ParentNode.RemoveChild node |> ignore
 
         deleteIfEmpty "ItemGroup" project |> ignore
 
@@ -1452,14 +1498,12 @@ module ProjectFile =
                 |> getDescendants "Analyzer"
                 |>  List.filter isAnalyserFromNuget
 
-        toDelete
-        |> List.iter
-            (fun node ->
-                tracefn "Removing 'Analyzer' entry from %s for project %s" 
-                    (node |> getAttribute "Include" |> Option.get)
-                    project.FileName 
+        for node in toDelete do
+            tracefn "Removing 'Analyzer' entry from %s for project %s"
+                (node |> getAttribute "Include" |> Option.get)
+                project.FileName 
 
-                node.ParentNode.RemoveChild node |> ignore)
+            node.ParentNode.RemoveChild node |> ignore
                         
     let outputType (project:ProjectFile) =
         seq {for outputType in project.Document |> getDescendants "OutputType" ->
@@ -1507,7 +1551,10 @@ module ProjectFile =
             project.Document
             |> getDescendants "AssemblyName"
             |> function
-               | [] -> failwithf "Project %s has no AssemblyName set" project.FileName
+               | [] ->
+                  match getToolsVersion project with
+                  | 15.0 -> ""
+                  | _ -> failwithf "Project %s has no AssemblyName set" project.FileName
                | [assemblyName] -> assemblyName.InnerText
                | assemblyName::_ ->
                     traceWarnfn "Found multiple AssemblyName nodes in file %s, using first" project.FileName
@@ -1520,6 +1567,12 @@ module ProjectFile =
 
         let ending = outputType project |> function ProjectOutputType.Library -> "dll" | ProjectOutputType.Exe -> "exe"
         sprintf "%s.%s" assemblyName ending
+    
+    let getPaketPropsFileInfo (projectFileInfo:FileInfo) =
+        FileInfo(Path.Combine(projectFileInfo.Directory.FullName,"obj",projectFileInfo.Name + ".paket.props"))
+
+    let getAssetsFileInfo (projectFileInfo:FileInfo) =
+        FileInfo(Path.Combine(projectFileInfo.Directory.FullName,"obj","project.assets.json"))
 
     let getOutputDirectory buildConfiguration buildPlatform (project:ProjectFile) =
         let targetFramework = 
@@ -1528,25 +1581,23 @@ module ProjectFile =
             | None -> ""
 
         let platforms =
-            if not <| String.IsNullOrWhiteSpace buildPlatform then 
+            if not (String.IsNullOrWhiteSpace buildPlatform) then 
                 [buildPlatform]
             else
-                [
-                    "AnyCPU";
-                    "AnyCPU32BitPreferred";
-                    "x86";
-                    "x64";
-                    "Win32";
-                    "ARM";
-                    "Itanium";
-                ]
+                [ "AnyCPU"
+                  "AnyCPU32BitPreferred"
+                  "x86"
+                  "x64"
+                  "Win32"
+                  "ARM"
+                  "Itanium" ]
 
         let rec tryNextPlat platforms attempted =
             match platforms with
             | [] ->
-                if String.IsNullOrEmpty(targetFramework) = false then
+                if not (String.IsNullOrEmpty targetFramework) then
                     Path.Combine("bin", buildConfiguration, targetFramework)
-                else if String.IsNullOrWhiteSpace(buildPlatform) then
+                elif String.IsNullOrWhiteSpace buildPlatform then
                     failwithf "Unable to find %s output path node in file %s for any known platforms" buildConfiguration project.FileName
                 else
                     failwithf "Unable to find %s output path node in file %s targeting the %s platform" buildConfiguration project.FileName buildPlatform
@@ -1583,7 +1634,7 @@ module ProjectFile =
 
             { NugetPackage.Id = node |> getAttribute "Include" |> Option.get
               VersionRange = versionRange
-              CliTool = false
+              Kind = NugetPackageKind.Package
               TargetFramework = None })
 
     let cliTools (projectFile: ProjectFile) =
@@ -1605,7 +1656,7 @@ module ProjectFile =
 
             { NugetPackage.Id = node |> getAttribute "Include" |> Option.get
               VersionRange = versionRange
-              CliTool = true
+              Kind = NugetPackageKind.DotnetCliTool
               TargetFramework = None })
 
 type ProjectFile with
@@ -1676,7 +1727,7 @@ type ProjectFile with
 
     member this.GetTargetFrameworkProfile () = ProjectFile.getTargetFrameworkProfile this
 
-    member this.GetTargetProfile () =  ProjectFile.getTargetProfile this
+    member this.GetTargetProfiles() =  ProjectFile.getTargetProfiles this
     
     member this.AddImportForPaketTargets relativeTargetsPath = ProjectFile.addImportForPaketTargets relativeTargetsPath this
 
@@ -1756,28 +1807,7 @@ type ProjectFile with
 
     member this.FindTemplatesFile() = this.FindCorrespondingFile Constants.TemplateFile
 
-    member this.GetToolsVersion () : float =
-        let adjustIfWeHaveSDK v =
-            try
-                let sdkAttr = this.ProjectNode.Attributes.["Sdk"]
-                if isNull sdkAttr || String.IsNullOrWhiteSpace sdkAttr.Value
-                then v   // adjustment so paket still installs to old style msbuild projects that are using MSBuild15 but not the new format
-                else 15.0
-            with
-            | _ -> v
-
-        match this.ProjectNode.Attributes.["ToolsVersion"] with
-        | null -> adjustIfWeHaveSDK 4.0
-        | v ->
-            match Double.TryParse(v.Value, NumberStyles.Any, CultureInfo.InvariantCulture) with
-            | true , 15.0 ->
-                    let sdkAttr = this.ProjectNode.Attributes.["Sdk"]
-                    if  isNull sdkAttr || String.IsNullOrWhiteSpace sdkAttr.Value
-                    then 14.0   // adjustment so paket still installs to old style msbuild projects that are using MSBuild15 but not the new format
-                    else 15.0
-            | true,  version -> adjustIfWeHaveSDK version
-            | _         -> adjustIfWeHaveSDK 4.0
-
+    member this.GetToolsVersion () = ProjectFile.getToolsVersion this
 
     static member FindOrCreateReferencesFile projectFile =
         match ProjectFile.FindReferencesFile(projectFile) with
@@ -1994,18 +2024,18 @@ type ProjectFile with
         
         let tryBool = Boolean.TryParse>>function true, value-> value| _ -> false
         
-        let splitString = String.split[|';'|]>>List.ofArray
+        let splitString = String.split[|';'|] >> Array.map (fun x -> x.Trim()) >> List.ofArray
 
         let coreInfo : ProjectCoreInfo = {
             Id = prop "id" 
             Version = propMap "version" (Some(SemVer.Parse "0.0.1")) (SemVer.Parse>>Some)
-            Authors = propMap "Authors" None (splitString>>Some)
+            Authors = propMap "Authors" None (splitString >> Some)
             Description = prop "Description" 
             Symbols = propMap "Symbols" false tryBool
         }
         let optionalInfo =  {
             Title = prop "Title"
-            Owners = propMap "Owners" [] (String.split[|';'|]>>List.ofArray)
+            Owners = propMap "Owners" [] splitString
             ReleaseNotes = prop "ReleaseNores"
             Summary = prop "Summary"
             Language = prop "Langauge"

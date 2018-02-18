@@ -81,7 +81,8 @@ module internal NupkgWriter =
         let buildFrameworkReferencesNode frameworkAssembliesList =
             if List.isEmpty frameworkAssembliesList then () else
             let d = XElement(ns + "frameworkAssemblies")
-            frameworkAssembliesList |> List.iter (buildFrameworkReferencesNode >> d.Add)
+            for fa in frameworkAssembliesList do
+                d.Add(buildFrameworkReferencesNode fa)
             metadataNode.Add d
 
         let buildDependencyNode (Id, requirement:VersionRequirement) =
@@ -102,26 +103,31 @@ module internal NupkgWriter =
             add g
             g
 
-
-        let buildDependencyNodes (excludedDependencies, add, dependencyList)  =
+        let aggregateDependencies excludedDependencies dependencyList =
             dependencyList
-            |> List.filter (fun (a, _) -> Set.contains a excludedDependencies |> not)
-            |> List.map  (fun (a, b) -> a, b)
+            |> List.filter (fun (a, _) -> Set.contains a excludedDependencies |> not)            
+
+        let buildDependencyNodes (add, dependencies)  =
+            dependencies
             |> List.iter (buildDependencyNode >> add)
 
-        let buildDependencyNodesByGroup excludedDependencies add dependencyGroup  =
-            let node = buildGroupNode(dependencyGroup.Framework, add)
-            buildDependencyNodes(excludedDependencies, node.Add, dependencyGroup.Dependencies)
+        let buildDependencyNodesByGroup excludedDependencies add dependencyGroup =
+            match aggregateDependencies excludedDependencies dependencyGroup.Dependencies with
+            | [] when Option.isNone dependencyGroup.Framework -> ()
+            | dependencies ->
+                let node = buildGroupNode(dependencyGroup.Framework, add)
+                buildDependencyNodes(node.Add, dependencies)
 
         let buildDependenciesNode excludedDependencies dependencyGroups =
             if List.isEmpty dependencyGroups then () else
             let d = XElement(ns + "dependencies")
-            match dependencyGroups.Length, dependencyGroups.Head.Framework with
-            | (1, None) ->
-                buildDependencyNodes(excludedDependencies, d.Add, dependencyGroups.Head.Dependencies)
+            match dependencyGroups with
+            | [g] when Option.isNone g.Framework ->
+                let deps = aggregateDependencies excludedDependencies g.Dependencies
+                buildDependencyNodes(d.Add, deps)
             | _ -> 
-                dependencyGroups 
-                |> List.iter (fun g -> buildDependencyNodesByGroup excludedDependencies d.Add g)
+                for g in dependencyGroups do
+                    buildDependencyNodesByGroup excludedDependencies d.Add g
             metadataNode.Add d
 
         let buildReferenceNode (fileName) =
@@ -132,12 +138,13 @@ module internal NupkgWriter =
         let buildReferencesNode referenceList =
             if List.isEmpty referenceList then () else
             let d = XElement(ns + "references")
-            referenceList |> List.iter (buildReferenceNode >> d.Add)
+            for r in referenceList do 
+                d.Add(buildReferenceNode r)
             metadataNode.Add d
 
         !! "id" core.Id
         match core.Version with
-        | Some v -> !! "version" <| v.ToString()
+        | Some v -> !! "version" (v.ToString())
         | None -> failwithf "No version was given for %s" core.PackageFileName
         (!!?) "title" optional.Title
         !! "authors" (core.Authors |> String.concat ", ")
@@ -322,10 +329,10 @@ module internal NupkgWriter =
 
         // adds all files in a directory to the zipFile
         let rec addDir source target =
-            if not <| isExcluded source then
+            if not (isExcluded source) then
                 let target = ensureValidTargetName target
                 for file in Directory.EnumerateFiles(source,"*.*",SearchOption.TopDirectoryOnly) do
-                    if not <| isExcluded file then
+                    if not (isExcluded file) then
                         let fi = FileInfo file
                         let fileName = ensureValidName fi.Name
                         let path = Path.Combine(target,fileName)
@@ -344,8 +351,8 @@ module internal NupkgWriter =
                 addDir source targetFileName
             else
                 if File.Exists source then
-                    if not <| isExcluded source then
-                        let fi = FileInfo(source)
+                    if not (isExcluded source) then
+                        let fi = FileInfo source
                         let fileName = ensureValidName fi.Name
                         let path = Path.Combine(targetFileName,fileName)
                         addEntryFromFile path source
@@ -378,9 +385,7 @@ module NuspecExtensions =
                 Id + ".nuspec", nuspecDoc (projectInfo.ToCoreInfo Id, optionalInfo)
             
 
-        static member FromProject (projectPath:string, dependenciesPath:string) = 
-            let dependencies = DependenciesFile.ReadFromFile dependenciesPath
-            let lockFile = (DependenciesFile.FindLockfile dependenciesPath).FullName |> LockFile.LoadFrom
+        static member FromProject (projectPath:string, dependenciesFile:DependenciesFile) =
             match ProjectFile.TryLoad projectPath  with
             | None -> failwithf "unable to load project from path '%s'" projectPath
             | Some project ->
@@ -390,7 +395,7 @@ module NuspecExtensions =
                         let references = ReferencesFile.FromFile refsPath
                         references.Groups |> Seq.collect (fun kvp -> 
                         kvp.Value.NugetPackages |> List.choose (fun pkg -> 
-                            dependencies.TryGetPackage(kvp.Key,pkg.Name)
+                            dependenciesFile.TryGetPackage(kvp.Key,pkg.Name)
                             |> Option.map (fun verreq -> pkg.Name,verreq.VersionRequirement)))
                         |> List.ofSeq
                     ) |> Option.defaultValue []

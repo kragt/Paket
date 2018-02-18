@@ -13,32 +13,18 @@ open Paket.Logging
 let scenarios = System.Collections.Generic.List<_>()
 let isLiveUnitTesting = AppDomain.CurrentDomain.GetAssemblies() |> Seq.exists (fun a -> a.GetName().Name = "Microsoft.CodeAnalysis.LiveUnitTesting.Runtime")
 
-let partitionForTravis scenario =
-
-    // travis executes tests in three stages:
-    // * -1: build only
-    // * 0: first half of the scenario tests
-    // * 1: second half of the scenario tests
-    //
-    // use the hash of the scenario name to key between stage 0 and 1.
-    let currentTravisStage =
-        match Environment.GetEnvironmentVariable "TRAVIS_STAGE" with
-        | null | "" -> None
-        | sInt ->
-            match Int32.TryParse sInt with
-            | true, iState -> Some iState
-            | _ -> None
-    
-    if currentTravisStage <> None &&
-       currentTravisStage <> Some (scenario.GetHashCode() % 2)
-    then Assert.Ignore("ignored in this part of the travis build")
-    
-
-let paketToolPath = FullName(__SOURCE_DIRECTORY__ + "../../../bin/paket.exe")
 let dotnetToolPath =
     match Environment.GetEnvironmentVariable "DOTNET_EXE_PATH" with
     | null | "" -> "dotnet"
     | s -> s
+
+let paketToolPath =
+#if PAKET_NETCORE
+    dotnetToolPath, FullName(__SOURCE_DIRECTORY__ + "../../../bin_netcore/paket.dll")
+#else
+    "", FullName(__SOURCE_DIRECTORY__ + "../../../bin/paket.exe")
+#endif
+
 let integrationTestPath = FullName(__SOURCE_DIRECTORY__ + "../../../integrationtests/scenarios")
 let scenarioTempPath scenario = Path.Combine(integrationTestPath,scenario,"temp")
 let originalScenarioPath scenario = Path.Combine(integrationTestPath,scenario,"before")
@@ -56,18 +42,19 @@ let cleanupAllScenarios() =
         cleanup scenario
     scenarios.Clear()
 
+let createScenarioDir scenario =
+    let scenarioPath = scenarioTempPath scenario
+    CleanDir scenarioPath
+    scenarioPath
 
 let prepare scenario =
-    partitionForTravis scenario
-
     if isLiveUnitTesting then Assert.Inconclusive("Integration tests are disabled when in a Live-Unit-Session")
     if scenarios.Count > 10 then
         cleanupAllScenarios()
 
     scenarios.Add scenario
     let originalScenarioPath = originalScenarioPath scenario
-    let scenarioPath = scenarioTempPath scenario
-    CleanDir scenarioPath
+    let scenarioPath = createScenarioDir scenario
     CopyDir scenarioPath originalScenarioPath (fun _ -> true)
 
     for ext in ["fsproj";"csproj";"vcxproj";"template";"json"] do
@@ -76,8 +63,8 @@ let prepare scenario =
 
 let prepareSdk scenario =
     let tmpPaketFolder = (scenarioTempPath scenario) @@ ".paket"
-    let targetsFile = FullName(__SOURCE_DIRECTORY__ + "../../../src/Paket/embedded/Paket.Restore.targets")
-    let paketExe = FullName(__SOURCE_DIRECTORY__ + "../../../bin/paket.exe")
+    let targetsFile = FullName(__SOURCE_DIRECTORY__ + "../../../src/Paket.Core/embedded/Paket.Restore.targets")
+    let paketExe = snd paketToolPath
 
     setEnvironVar "PaketExePath" paketExe
     prepare scenario
@@ -92,13 +79,20 @@ type PaketMsg =
     static member isError ({ IsError = e}:PaketMsg) = e
     static member getMessage ({ Message = msg }:PaketMsg) = msg
 
-let directToolEx isPaket toolPath command workingDir =
+let directToolEx isPaket toolInfo commands workingDir =
+    let processFilename, processArgs =
+        match fst toolInfo, snd toolInfo with
+        | "", path ->
+            path, commands
+        | host, path ->
+            host, (sprintf "%s %s" path commands)
+
     #if INTERACTIVE
     let result =
         ExecProcessWithLambdas (fun info ->
-          info.FileName <- toolPath
+          info.FileName <- processFilename
           info.WorkingDirectory <- workingDir
-          info.Arguments <- command) 
+          info.Arguments <- processArgs) 
           (System.TimeSpan.FromMinutes 7.)
           false
           (printfn "%s")
@@ -108,7 +102,8 @@ let directToolEx isPaket toolPath command workingDir =
     res
     #else
     Environment.SetEnvironmentVariable("PAKET_DETAILED_ERRORS", "true")
-    printfn "%s> %s %s" workingDir (if isPaket then "paket" else toolPath) command
+    Environment.SetEnvironmentVariable("PAKET_DETAILED_WARNINGS", "true")
+    printfn "%s> %s %s" workingDir (if isPaket then "paket" else processFilename) processArgs
     let perfMessages = ResizeArray()
     let msgs = ResizeArray<PaketMsg>()
     let mutable perfMessagesStarted = false
@@ -124,10 +119,10 @@ let directToolEx isPaket toolPath command workingDir =
     let result =
         try
             ExecProcessWithLambdas (fun info ->
-              info.FileName <- toolPath
+              info.FileName <- processFilename
               info.WorkingDirectory <- workingDir
               info.CreateNoWindow <- true
-              info.Arguments <- command)
+              info.Arguments <- processArgs)
               (System.TimeSpan.FromMinutes 7.)
               true
               (addAndPrint true)
@@ -141,6 +136,12 @@ let directToolEx isPaket toolPath command workingDir =
             for { IsError = isError; Message = msg } in msgs do
                 printfn "%s%s" (if isError then "ERR: " else "") msg
             reraise()
+
+    // always print stderr
+    for msg in msgs do
+        if msg.IsError then
+            printfn "ERR: %s" msg.Message
+
     if isPaket then
         // Only throw after the result <> 0 check because the current test might check the argument parsing
         // this is the only case where no performance is printed
@@ -151,11 +152,6 @@ let directToolEx isPaket toolPath command workingDir =
             printfn "Performance:"
             for msg in perfMessages do
                 printfn "%s" msg
-
-    // always print stderr
-    for msg in msgs do
-        if msg.IsError then
-            printfn "ERR: %s" msg.Message
 
     if result <> 0 then 
         let errors = String.Join(Environment.NewLine,msgs |> Seq.filter PaketMsg.isError |> Seq.map PaketMsg.getMessage)
@@ -177,7 +173,7 @@ let checkResults msgs =
     |> shouldEqual []
 
 let directDotnet checkZeroWarn command workingDir =
-    let msgs = directToolEx false dotnetToolPath command workingDir
+    let msgs = directToolEx false ("", dotnetToolPath) command workingDir
     if checkZeroWarn then checkResults msgs
     msgs
 
@@ -187,7 +183,6 @@ let private fromMessages msgs =
 let directPaketInPath command scenarioPath = directPaketInPathEx command scenarioPath |> fromMessages
 
 let directPaketEx command scenario =
-    partitionForTravis scenario
     directPaketInPathEx command (scenarioTempPath scenario)
 
 let directPaket command scenario = directPaketEx command scenario |> fromMessages
@@ -252,22 +247,60 @@ let clearPackage name =
             |> Seq.filter (fun n -> Path.GetFileName n |> String.startsWithIgnoreCase name)
             |> Seq.iter (fun n -> File.Delete(n))
 
-let isPackageCached name =
+let isPackageCached name version =
     // ~/.nuget/packages
     let userPackageFolder = Paket.Constants.UserNuGetPackagesFolder
 
     // %APPDATA%/NuGet/Cache
     let nugetCache = Paket.Constants.NuGetCacheFolder
 
-    [ nugetCache; userPackageFolder ]
-    |> List.collect (fun cacheDir ->
+    [ for cacheDir in [ nugetCache; userPackageFolder ] do
         if Directory.Exists cacheDir then
-            let dirs =
+            yield!
                 Directory.EnumerateDirectories(cacheDir)
-                |> Seq.filter (fun n -> Path.GetFileName n |> String.startsWithIgnoreCase name)
-            let files =
-                Directory.EnumerateFiles(cacheDir)
-                |> Seq.filter (fun n -> Path.GetFileName n |> String.startsWithIgnoreCase name)
-            Seq.append dirs files
-            |> Seq.toList
-        else [])
+                |> Seq.filter (fun n -> Path.GetFileName n |> String.equalsIgnoreCase name)
+                |> Seq.collect (fun n -> Directory.EnumerateDirectories(n))
+                |> Seq.filter (fun n -> Path.GetFileName n |> String.equalsIgnoreCase version)
+                |> Seq.toList ]
+
+let clearPackageAtVersion name version =
+    isPackageCached name version
+    |> List.iter (fun n -> Directory.Delete(n, true))
+
+// Checks if a given package is present in cache ONLY with lowercase naming (see issue #2812)
+let isPackageCachedWithOnlyLowercaseNames (name: string) =
+    // // ~/.nuget/packages
+    let userPackageFolder = Paket.Constants.UserNuGetPackagesFolder
+
+    // // %APPDATA%/NuGet/Cache
+    let nugetCache = Paket.Constants.NuGetCacheFolder
+
+    let lowercaseName = name.ToLowerInvariant()
+
+    let packageFolders = 
+        [ nugetCache; userPackageFolder ]
+        |> List.collect (Directory.GetDirectories >> List.ofArray)
+        |> List.filter (fun x -> Path.GetFileName x |> String.equalsIgnoreCase name)
+
+    let packageFolderNames = packageFolders |> List.map Path.GetFileName |> List.distinct
+    
+    // ensure that names of package directories are lowercase only
+    match packageFolderNames with
+    | [ x ] when x = lowercaseName ->
+        // ensure thet names o package files that start with package name are lowercase only
+        let packageFiles =
+            packageFolders
+            |> Seq.collect Directory.GetDirectories
+            |> Seq.collect Directory.GetFiles
+        let packageFileNames = packageFiles |> Seq.map Path.GetFileName
+        let packageNameSegments =
+            packageFileNames
+            |> Seq.filter (String.startsWithIgnoreCase <| sprintf "%s." name)
+            |> Seq.map (fun x -> x.Substring(0, name.Length))
+            |> Seq.distinct
+            |> List.ofSeq
+        packageNameSegments = [ lowercaseName ]
+    | _ -> false
+
+[<AttributeUsage(AttributeTargets.Method, AllowMultiple=false)>]
+type FlakyAttribute() = inherit CategoryAttribute()

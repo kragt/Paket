@@ -64,7 +64,8 @@ let getDescription attributes =
     |> Seq.tryPick (function Description d when notNullOrEmpty d -> Some d | _ -> None)
 
 let readAssembly fileName =
-    traceVerbose <| sprintf "Loading assembly metadata for %s" fileName
+    if verbose then
+        traceVerbose (sprintf "Loading assembly metadata for %s" fileName)
     let assemblyReader = 
         ProviderImplementation.AssemblyReader.ILModuleReaderAfterReadingAllBytes(
             fileName, 
@@ -164,7 +165,7 @@ let findDependencies (dependenciesFile : DependenciesFile) config platform (temp
     let targetDir = 
         match project.OutputType with
         | ProjectOutputType.Exe -> "tools/"
-        | ProjectOutputType.Library -> sprintf "lib/%O/" (project.GetTargetProfile())
+        | ProjectOutputType.Library -> project.GetTargetProfiles() |> List.map (sprintf "lib/%O/") |> List.head // TODO: multi target pack
     
     let projectDir = Path.GetDirectoryName project.FileName
 
@@ -285,7 +286,7 @@ let findDependencies (dependenciesFile : DependenciesFile) config platform (temp
         |> List.fold (fun templatefile file -> addFile (toFile config platform file) targetDir templatefile) withDeps
 
     let lockFile = 
-        dependenciesFile.FindLockfile().FullName
+        dependenciesFile.FindLockFile().FullName
         |> LockFile.LoadFrom
 
     let allReferences = 

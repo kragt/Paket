@@ -73,7 +73,11 @@ let private followODataLink auth url =
 
             match atLeastOneFailed with
             | Some i ->
-                traceWarnfn "At least one 'next' link (index %d) returned a empty result (noticed on '%O'): ['%s']" i url (System.String.Join("' ; '", linksToFollow))
+                let mutable uri = null // warn once per specific API endpoint, but try to cut the query
+                let baseUrl = if Uri.TryCreate(url, UriKind.Absolute, &uri) then uri.AbsolutePath else url
+                traceWarnIfNotBefore baseUrl
+                    "At least one 'next' link (index %d) returned a empty result (noticed on '%O'): ['%s']" 
+                    i url (System.String.Join("' ; '", linksToFollow))
             | None -> ()
             return
                 true,
@@ -98,7 +102,7 @@ let tryGetAllVersionsFromNugetODataWithFilter (auth, nugetURL, package:PackageNa
                 match tryGetAllVersionsFromNugetODataWithFilterWarnings.TryGetValue nugetURL with
                 | true, true -> ()
                 | _, _ ->
-                    eprintfn "Possible Performance degration, could not retrieve '%s', ignoring further warnings for this source" url
+                    traceWarnfn "Possible Performance degradation, could not retrieve '%s', ignoring further warnings for this source" url
                     tryGetAllVersionsFromNugetODataWithFilterWarnings.TryAdd(nugetURL, true) |> ignore
                 if verbose then
                     printfn "Error while retrieving data from '%s': %O" url exn
@@ -141,7 +145,7 @@ let private getXmlDoc url raw =
     try
         doc.LoadXml raw
     with
-    | e -> raise <| Exception(sprintf "Could not parse response from %s as OData.%sData:%s%s" url Environment.NewLine Environment.NewLine raw, e)
+    | e -> raise (Exception(sprintf "Could not parse response from %s as OData.%sData:%s%s" url Environment.NewLine Environment.NewLine raw, e))
     doc
 
 let private handleODataEntry nugetURL packageName version entry =
@@ -188,9 +192,11 @@ let private handleODataEntry nugetURL packageName version entry =
             (if a.Length > 2 && a.[2] <> "" then
                 let restriction = a.[2]
                 match PlatformMatching.extractPlatforms false restriction with
-                | Some p -> Some p
+                | Some p ->
+                    Some { p with Platforms = p.Platforms |> List.filter KnownTargetProfiles.isSupportedProfile }
                 | None ->
-                    Logging.traceWarnIfNotBefore ("Package", restriction, packageName, version) "Could not detect any platforms from '%s' in package %O %O, please tell the package authors" restriction packageName version
+                    if not (restriction.StartsWith "_") then 
+                        Logging.traceWarnIfNotBefore ("Package", restriction, packageName, version) "Could not detect any platforms from '%s' in package %O %O, please tell the package authors" restriction packageName version
                     None
              else Some PlatformMatching.ParsedPlatformPath.Empty)
             |> Option.map (fun pp -> name, version, pp)
@@ -211,7 +217,8 @@ let private handleODataEntry nugetURL packageName version entry =
     let dependencies, warnings =
         addFrameworkRestrictionsToDependencies cleanedPackages frameworks
     for warning in warnings do
-        Logging.traceWarnfn "%s" (warning.Format officialName version)
+        let message = warning.Format officialName version
+        Logging.traceWarnIfNotBefore message "%s" message
 
     { PackageName = officialName
       DownloadUrl = downloadLink

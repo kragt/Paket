@@ -87,8 +87,22 @@ Example:
 
 ### With environment variables
 
-`PAKET.VERSION`: The requested version can also be set using this environment
+`PAKET_VERSION`: The requested version can also be set using this environment
 variable.
+
+* powershell   
+    ```
+    $env:PAKET_VERSION = "5.119.7"
+    ```
+* cmd
+    ```
+    set PAKET_VERSION=5.119.7
+    ```
+* bash
+    ```
+    export PAKET_VERSION="5.119.7"
+    ```
+    
 
 ### In paket.dependencies
 
@@ -139,7 +153,9 @@ that contributors to your repository won't have to know — or care — about.
 
 While bootstrapper command line options can't be used, the other sources
 (application settings, environment variables and paket.dependencies) may still
-be used to configure the bootstrapper.
+be used to configure the bootstrapper. The only difference is that the
+application settings file should be named `paket.exe.config` rather than
+`paket.bootstrapper.exe.config`.
 
 A few default settings are applied:
 

@@ -1,6 +1,7 @@
 ﻿namespace Paket
 
 module DependenciesFileParser =
+    open System.Numerics
     open System
     open System.IO
     open Requirements
@@ -25,29 +26,36 @@ module DependenciesFileParser =
         | PaketStrategy -> Some ResolverStrategy.Max
         | NoStrategy -> None
 
-    let twiddle (minimum:string) =
-        let promote index (values:string array) =
-            let parsed, number = Int32.TryParse values.[index]
-            if parsed then values.[index] <- (number + 1).ToString()
-            if values.Length > 1 then values.[values.Length - 1] <- "0"
-            values
-
-        let parts = minimum.Split '.'
-        let penultimateItem = Math.Max(parts.Length - 2, 0)
-        let promoted = parts |> promote penultimateItem
-        String.Join(".", promoted)
+    let twiddle (minimum:SemVerInfo) =
+        let inline isNumeric item = 
+            match BigInteger.TryParse item with
+            | true, number -> Some(number)
+            | false, _ -> None
+            
+        let mutable fragments = 
+            ((minimum.AsString.Split '-').[0].Split '.')
+            |> Array.map isNumeric 
+            |> Array.takeWhile (fun i -> i.IsSome) 
+            |> Array.choose (fun i -> i)
+            
+        let proIndex = Math.Max(fragments.Length - 2, 0)
+        fragments.[proIndex] <- fragments.[proIndex] + BigInteger.One
+        
+        let promoted = fragments |> Array.take (proIndex + 1)
+        String.Join(".", promoted |> Array.map (fun i -> i.ToString()))
 
     let parseVersionRequirement (text : string) : VersionRequirement =
         try
-            let inline parsePrerelease (versions:SemVerInfo list) (texts : string list) = 
-                match texts |> List.filter ((<>) "") with
+            let inline parsePrerelease (versions:SemVerInfo list) (texts : string list) =
+                let items = texts |> List.filter ((<>) "") |> List.distinct
+                match items with
                 | [] -> 
                     versions
                     |> List.collect (function { PreRelease = Some x } -> [x.Name] | _ -> [])
                     |> List.distinct
                     |> function [] -> PreReleaseStatus.No | xs -> PreReleaseStatus.Concrete xs
                 | [x] when String.equalsIgnoreCase x "prerelease" -> PreReleaseStatus.All
-                | _ -> PreReleaseStatus.Concrete texts
+                | _ -> PreReleaseStatus.Concrete items
 
             if String.IsNullOrWhiteSpace text then VersionRequirement(VersionRange.AtLeast "0",PreReleaseStatus.No) else
 
@@ -61,11 +69,11 @@ module DependenciesFileParser =
                 let v2 = SemVer.Parse v2
                 VersionRequirement(VersionRange.Range(VersionRangeBound.Including,v1,v2,VersionRangeBound.Including),parsePrerelease [v1; v2] rest)
             |  "~>" :: v1 :: ">=" :: v2 :: rest -> 
-                let v1 = SemVer.Parse(twiddle v1)
+                let v1 = SemVer.Parse(twiddle (SemVer.Parse v1))
                 let v2 = SemVer.Parse v2
                 VersionRequirement(VersionRange.Range(VersionRangeBound.Including,v2,v1,VersionRangeBound.Excluding),parsePrerelease [v1; v2] rest)
             |  "~>" :: v1 :: ">" :: v2 :: rest ->
-                let v1 = SemVer.Parse(twiddle v1)
+                let v1 = SemVer.Parse(twiddle (SemVer.Parse v1))
                 let v2 = SemVer.Parse v2
                 VersionRequirement(VersionRange.Range(VersionRangeBound.Excluding,v2,v1,VersionRangeBound.Excluding),parsePrerelease [v1; v2] rest)
             |  ">" :: v1 :: "<" :: v2 :: rest -> 
@@ -81,7 +89,6 @@ module DependenciesFileParser =
                     match VersionRange.BasicOperators |> List.tryFind(text.StartsWith) with
                     | Some token -> token, text.Replace(token + " ", "").Split ' ' |> Array.toList
                     | None -> "=", text.Split ' ' |> Array.toList
-
             
                 match splitVersion text with
                 | "==", version :: rest -> 
@@ -101,7 +108,7 @@ module DependenciesFileParser =
                     VersionRequirement(VersionRange.Maximum v,parsePrerelease [v] rest)
                 | "~>", minimum :: rest -> 
                     let v1 = SemVer.Parse minimum
-                    VersionRequirement(VersionRange.Between(minimum,twiddle minimum),parsePrerelease [v1] rest)
+                    VersionRequirement(VersionRange.Between(minimum,twiddle v1),parsePrerelease [v1] rest)
                 | _, version :: rest -> 
                     let v = SemVer.Parse version
                     VersionRequirement(VersionRange.Specific v,parsePrerelease [v] rest)
@@ -170,7 +177,7 @@ module DependenciesFileParser =
             let fileName = 
                 if String.IsNullOrEmpty fileSpec then
                     let name = splitted |> Seq.last |> removeQueryString
-                    if String.IsNullOrEmpty <| Path.GetExtension name then name + ".fs"
+                    if String.IsNullOrEmpty (Path.GetExtension name) then name + ".fs"
                     else name
                 else fileSpec
             
@@ -192,6 +199,7 @@ module DependenciesFileParser =
     | OmitContent of ContentCopySettings
     | FrameworkRestrictions of FrameworkRestrictions
     | AutodetectFrameworkRestrictions
+    | LicenseDownload of bool
     | ImportTargets of bool
     | CopyLocal of bool
     | StorageConfig of PackagesFolderGroupConfig option
@@ -307,6 +315,7 @@ module DependenciesFileParser =
                 | _ -> None
 
             Some (ParserOptions (ParserOption.ResolverStrategyForDirectDependencies setting))
+        | String.RemovePrefix "frameworks" trimmed
         | String.RemovePrefix "framework" trimmed -> 
             let text = trimmed.Replace(":", "").Trim()
             
@@ -340,6 +349,7 @@ module DependenciesFileParser =
 
             Some (ParserOptions (ParserOption.OmitContent setting))
         | String.RemovePrefix "import_targets" trimmed -> Some (ParserOptions (ParserOption.ImportTargets(trimmed.Replace(":","").Trim() = "true")))
+        | String.RemovePrefix "license_download" trimmed -> Some (ParserOptions (ParserOption.LicenseDownload(trimmed.Replace(":","").Trim() = "true")))
         | String.RemovePrefix "copy_local" trimmed -> Some (ParserOptions (ParserOption.CopyLocal(trimmed.Replace(":","").Trim() = "true")))
         | String.RemovePrefix "specific_version" trimmed -> Some (ParserOptions (ParserOption.SpecificVersion(trimmed.Replace(":","").Trim() = "true")))
         | String.RemovePrefix "copy_content_to_output_dir" trimmed -> 
@@ -384,7 +394,7 @@ module DependenciesFileParser =
         | String.RemovePrefix "group" _ as trimmed -> Some (Group (trimmed.Replace("group ","")))
         | _ -> None
 
-    let parsePackage (sources,parent,name,version,isCliTool,rest:string) =
+    let parsePackage (sources,parent,name,version,kind,rest:string) =
         let prereleases,optionsText =
             if rest.Contains ":" then
                 // boah that's reaaaally ugly, but keeps backwards compat
@@ -428,12 +438,12 @@ module DependenciesFileParser =
           Settings = InstallSettings.Parse(optionsText).AdjustWithSpecialCases packageName
           TransitivePrereleases = versionRequirement.PreReleases <> PreReleaseStatus.No
           VersionRequirement = versionRequirement 
-          IsCliTool = isCliTool } 
+          Kind = kind } 
 
     let parsePackageLine(sources,parent,line:string) =
         match line with 
-        | Package(name,version,rest) -> parsePackage(sources,parent,name,version,false,rest)
-        | CliTool(name,version,rest) -> parsePackage(sources,parent,name,version,true,rest)
+        | Package(name,version,rest) -> parsePackage(sources,parent,name,version,PackageRequirementKind.Package,rest)
+        | CliTool(name,version,rest) -> parsePackage(sources,parent,name,version,PackageRequirementKind.DotnetCliTool,rest)
         | _ -> failwithf "Not a package line: %s" line
 
     let private parseOptions (current  : DependenciesGroup) options =
@@ -446,6 +456,7 @@ module DependenciesFileParser =
         | CopyLocal mode                                 -> { current.Options with Settings = { current.Options.Settings with CopyLocal = Some mode } }
         | SpecificVersion mode                           -> { current.Options with Settings = { current.Options.Settings with SpecificVersion = Some mode } }
         | CopyContentToOutputDir mode                    -> { current.Options with Settings = { current.Options.Settings with CopyContentToOutputDirectory = Some mode } }
+        | LicenseDownload mode                           -> { current.Options with Settings = { current.Options.Settings with LicenseDownload = Some mode } }
         | ImportTargets mode                             -> { current.Options with Settings = { current.Options.Settings with ImportTargets = Some mode } }
         | FrameworkRestrictions r                        -> { current.Options with Settings = { current.Options.Settings with FrameworkRestrictions = r } }
         | AutodetectFrameworkRestrictions                -> { current.Options with Settings = { current.Options.Settings with FrameworkRestrictions = AutoDetectFramework } }
@@ -483,14 +494,14 @@ module DependenciesFileParser =
                     lineNo,{ current with Options = parseOptions current options} ::other
 
                 | Package(name,version,rest) ->
-                    let package = parsePackage(current.Sources,DependenciesFile fileName,name,version,false,rest) 
+                    let package = parsePackage(current.Sources,DependenciesFile(fileName,lineNo),name,version,PackageRequirementKind.Package,rest) 
                     if checkDuplicates && current.Packages |> List.exists (fun p -> p.Name = package.Name) then
                         traceWarnfn "Package %O is defined more than once in group %O of %s" package.Name current.Name fileName
                     
                     lineNo, { current with Packages = current.Packages @ [package] }::other
 
                 | CliTool(name,version,rest) ->
-                    let package = parsePackage(current.Sources,DependenciesFile fileName,name,version,true,rest) 
+                    let package = parsePackage(current.Sources,DependenciesFile(fileName,lineNo),name,version,PackageRequirementKind.DotnetCliTool,rest) 
                     if checkDuplicates && current.Packages |> List.exists (fun p -> p.Name = package.Name) then
                         traceWarnfn "Package %O is defined more than once in group %O of %s" package.Name current.Name fileName
                     

@@ -125,8 +125,6 @@ let tryFindFolder folder (content:NuGetPackageContent) =
 
 let DownloadLicense(root,force,packageName:PackageName,version:SemVerInfo,licenseUrl,targetFileName) =
     async {
-        if String.IsNullOrWhiteSpace licenseUrl then return () else
-
         let targetFile = FileInfo targetFileName
         if not force && targetFile.Exists && targetFile.Length > 0L then
             if verbose then
@@ -137,7 +135,7 @@ let DownloadLicense(root,force,packageName:PackageName,version:SemVerInfo,licens
                     verbosefn "Downloading license for %O %O to %s" packageName version targetFileName
 
                 let request = HttpWebRequest.Create(Uri licenseUrl) :?> HttpWebRequest
-#if NETSTANDARD1_6
+#if NETSTANDARD1_6 || NETSTANDARD2_0
                 // Note: this code is not working on regular non-dotnetcore
                 // "This header must be modified with the appropriate property."
                 // But we don't have the UserAgent API available.
@@ -278,7 +276,18 @@ let rec private getPackageDetails alternativeProjectRoot root force (parameters:
                                 traceWarnfn "I/O error for source '%O': %s" source exn.Message
                             return! trySelectFirst (exn :> exn :: errors) rest
                         | e ->
-                            traceWarnfn "Source '%O' exception: %O" source e
+                            let mutable information = ""
+                            match e.GetBaseException() with 
+                            | :? RequestFailedException as re -> 
+                                match re.Info with 
+                                | Some requestinfo -> if requestinfo.StatusCode = HttpStatusCode.NotFound then
+                                                         information <- re.Message
+                                | None -> ignore()                                
+                            | _ -> ignore()
+                            if information <> "" then
+                                traceWarnIfNotBefore (source, information) "Source '%O' exception: %O" source information
+                            else 
+                                traceWarnfn "Source '%O' exception: %O" source e                                
                             //let capture = ExceptionDispatchInfo.Capture e
                             return! trySelectFirst (e :: errors) rest
                     | [] -> return None, errors
@@ -303,7 +312,7 @@ let rec private getPackageDetails alternativeProjectRoot root force (parameters:
                             return! tryV3 nugetSource force
                         with
                         | exn ->
-                            eprintfn "Possible Performance degration, V3 was not working: %s" exn.Message
+                            traceWarnfn "Possible Performance degradation, V3 was not working: %s" exn.Message
                             if verbose then
                                 printfn "Error while using V3 API: %O" exn
 
@@ -368,7 +377,7 @@ let rec GetPackageDetails alternativeProjectRoot root force (parameters:GetPacka
         try
             return! getPackageDetails alternativeProjectRoot root force parameters
         with
-        | exn ->
+        | exn when (not force) ->
             if verbose then
                 traceWarnfn "GetPackageDetails failed: %O" exn
             else
@@ -514,8 +523,7 @@ let GetVersions force alternativeProjectRoot root (parameters:GetPackageVersions
         let reportRequests withDetails (trial:GetVersionRequestResult) =
             let sb = new StringBuilder()
             let add s = sb.AddLine(s) |> ignore
-            trial.Requests
-            |> Seq.iter (fun sourceResult ->
+            for sourceResult in trial.Requests do
                 match sourceResult.Result with
                 | SourceNoResult ->
                     add(sprintf "Source '%s' yielded no results" sourceResult.Source.Url)
@@ -544,7 +552,7 @@ let GetVersions force alternativeProjectRoot root (parameters:GetPackageVersions
                                     add(sprintf " - Request '%s' finished with: [%s]" req.Request.Url (System.String.Join(" ; ", versions)))
                         else
                             add(sprintf " - Request '%s' is not finished yet" req.Request.Url)
-            )
+
             sb.ToString()
         let getException (trial:GetVersionRequestResult) message =
             trial.Requests
@@ -583,7 +591,8 @@ let GetVersions force alternativeProjectRoot root (parameters:GetPackageVersions
         | _ when Array.isEmpty trial1.Versions |> not ->
             return trial1.Requests
         | _ ->
-            traceWarn "Trial1 (NuGet.GetVersions) did not yield any results, trying again."
+            let requested = trial1.Requests |> Seq.collect (fun i -> i.Requests) |> Seq.map (fun r -> "   " + r.Request.Url)
+            traceWarnfn "Trial1 (NuGet.GetVersions) did not yield any results, trying again.%s%O" Environment.NewLine (String.Join(Environment.NewLine, requested)) 
             let! trial2 = trial true
             match trial2 with
             | _ when Array.isEmpty trial2.Versions |> not ->
@@ -597,7 +606,7 @@ let GetVersions force alternativeProjectRoot root (parameters:GetPackageVersions
                     | [source] -> sprintf "Could not find versions for package %O on %O." packageName source
                     | [] -> sprintf "Could not find versions for package %O, because no sources were specified." packageName
                     | sources -> sprintf "Could not find versions for package %O on any of %A." packageName sources
-                return raise <| getException trial2 errorMsg }
+                return raise (getException trial2 errorMsg) }
 
     let mergedResults =
         versions
@@ -620,30 +629,34 @@ let private getLicenseFile (packageName:PackageName) version =
     Path.Combine(NuGetCache.GetTargetUserFolder packageName version, NuGetCache.GetLicenseFileName packageName version)
 
 /// Downloads the given package to the NuGet Cache folder
-let DownloadAndExtractPackage(alternativeProjectRoot, root, isLocalOverride:bool, config:PackagesFolderGroupConfig, (source : PackageSource), caches:Cache list, groupName, packageName:PackageName, version:SemVerInfo, isCliTool, includeVersionInPath, force, detailed) =
+let private downloadAndExtractPackage(alternativeProjectRoot, root, isLocalOverride:bool, config:PackagesFolderGroupConfig, source : PackageSource, caches:Cache list, groupName, packageName:PackageName, version:SemVerInfo, kind, includeVersionInPath, downloadLicense, force, detailed) =
     let nupkgName = packageName.ToString() + "." + version.ToString() + ".nupkg"
     let normalizedNupkgName = NuGetCache.GetPackageFileName packageName version
     let configResolved = config.Resolve root groupName packageName version includeVersionInPath
     let targetFileName =
-        if not isLocalOverride then 
+        if not isLocalOverride then
             NuGetCache.GetTargetUserNupkg packageName version
         else
             match configResolved.Path with
             | Some p -> Path.Combine(p, nupkgName)
             | None -> failwithf "paket.local in combination with storage:none is not supported"
 
-    if isLocalOverride && not force then 
+    if isLocalOverride && not force then
         failwithf "internal error: when isLocalOverride is specified then force needs to be specified as well"
     let targetFile = FileInfo targetFileName
     let licenseFileName = getLicenseFile packageName version
 
-    if force then 
+    if force then
         match configResolved.Path with
         | Some p ->
             if verbose then
                 verbosefn "Cleaning %s" p
             CleanDir p
         | _ -> ()
+
+    let ensureDir fileName =
+        let parent = Path.GetDirectoryName fileName
+        if not (Directory.Exists parent) then Directory.CreateDirectory parent |> ignore
 
     let rec getFromCache (caches:Cache list) =
         match caches with
@@ -653,13 +666,15 @@ let DownloadAndExtractPackage(alternativeProjectRoot, root, isLocalOverride:bool
                 let cacheFile = FileInfo(Path.Combine(cacheFolder,normalizedNupkgName))
                 if cacheFile.Exists && cacheFile.Length > 0L then
                     tracefn "Copying %O %O from cache %s" packageName version cache.Location
-                    File.Copy(cacheFile.FullName,targetFileName)
+                    ensureDir targetFileName
+                    File.Copy(cacheFile.FullName,targetFileName,true)
                     true
                 else
                     let cacheFile = FileInfo(Path.Combine(cacheFolder,nupkgName))
                     if cacheFile.Exists && cacheFile.Length > 0L then
                         tracefn "Copying %O %O from cache %s" packageName version cache.Location
-                        File.Copy(cacheFile.FullName,targetFileName)
+                        ensureDir targetFileName
+                        File.Copy(cacheFile.FullName,targetFileName,true)
                         true
                     else
                         getFromCache rest
@@ -682,16 +697,16 @@ let DownloadAndExtractPackage(alternativeProjectRoot, root, isLocalOverride:bool
                     let nupkg = NuGetLocal.findLocalPackage di.FullName packageName version
 
                     use _ = Profile.startCategory Profile.Category.FileIO
-                    let parent = Path.GetDirectoryName targetFileName
-                    if not (Directory.Exists parent) then Directory.CreateDirectory parent |> ignore
+                    ensureDir targetFileName
                     File.Copy(nupkg.FullName,targetFileName,true)
                 | _ ->
                 // discover the link on the fly
                 let downloadUrl = ref ""
                 try
+                    let sw = System.Diagnostics.Stopwatch.StartNew()
+                    let groupString = if groupName = Constants.MainDependencyGroup then "" else sprintf " (%O)" groupName
                     if authenticated then
-                        let group = if groupName = Constants.MainDependencyGroup then "" else sprintf " (%O)" groupName
-                        tracefn "Downloading %O %O%s" packageName version group
+                        tracefn "Downloading %O %O%s" packageName version groupString
 
                     let! nugetPackage = GetPackageDetails alternativeProjectRoot root force (GetPackageDetailsParameters.ofParams [source] groupName packageName version)
 
@@ -714,14 +729,13 @@ let DownloadAndExtractPackage(alternativeProjectRoot, root, isLocalOverride:bool
 
                     if authenticated && verbose then
                         tracefn "Downloading from %O to %s" !downloadUrl targetFileName
-                    let dir = Path.GetDirectoryName targetFileName
-                    if Directory.Exists dir |> not then Directory.CreateDirectory dir |> ignore
+
+                    ensureDir targetFileName
 
                     use trackDownload = Profile.startCategory Profile.Category.NuGetDownload
-                    let! license = Async.StartChild(DownloadLicense(root,force,packageName,version,nugetPackage.LicenseUrl,licenseFileName), 5000)
 
                     let request = HttpWebRequest.Create(downloadUri) :?> HttpWebRequest
-#if NETSTANDARD1_6
+#if NETSTANDARD1_6 || NETSTANDARD2_0
                     // Note: this code is not working on regular non-dotnetcore
                     // "This header must be modified with the appropriate property."
                     // But we don't have the UserAgent API available.
@@ -731,7 +745,6 @@ let DownloadAndExtractPackage(alternativeProjectRoot, root, isLocalOverride:bool
                     request.UserAgent <- "Paket"
                     request.AutomaticDecompression <- DecompressionMethods.GZip ||| DecompressionMethods.Deflate
 #endif
-
                     if authenticated then
                         match source.Auth |> Option.map toCredentials with
                         | None | Some(Token _) -> request.UseDefaultCredentials <- true
@@ -746,7 +759,7 @@ let DownloadAndExtractPackage(alternativeProjectRoot, root, isLocalOverride:bool
                             let credentials = Convert.ToBase64String(Encoding.ASCII.GetBytes(username + ":" + password))
                             request.Headers.[HttpRequestHeader.Authorization] <- String.Format("Basic {0}", credentials)
                         | Some(Credentials(username, password, AuthType.NTLM)) ->
-                            let cred = NetworkCredential(username,password)        
+                            let cred = NetworkCredential(username,password)
                             request.Credentials <- cred.GetCredential(downloadUri, "NTLM")
                     else
                         request.UseDefaultCredentials <- true
@@ -770,12 +783,12 @@ let DownloadAndExtractPackage(alternativeProjectRoot, root, isLocalOverride:bool
                     match (httpResponse :?> HttpWebResponse).StatusCode with
                     | HttpStatusCode.OK -> ()
                     | statusCode -> failwithf "HTTP status code was %d - %O" (int statusCode) statusCode
-
-                    if verbose then
-                        verbosefn "Downloaded %O %O from %s." packageName version !downloadUrl
+                    
+                    tracefn "Download of %O %O%s done in %s." packageName version groupString (Utils.TimeSpanToReadableString sw.Elapsed)
 
                     try
-                        do! license
+                        if downloadLicense && not (String.IsNullOrWhiteSpace nugetPackage.LicenseUrl) then
+                            do! DownloadLicense(root,force,packageName,version,nugetPackage.LicenseUrl,licenseFileName)
                     with
                     | exn ->
                         if verbose then
@@ -787,15 +800,16 @@ let DownloadAndExtractPackage(alternativeProjectRoot, root, isLocalOverride:bool
                      (match source.Auth |> Option.map toCredentials with
                       | Some(Credentials(_)) -> true
                       | _ -> false)
-                        -> do! download false (attempt + 1)
+                        ->  traceWarnfn "Could not download %O %O.%s    %s.%sRetry." packageName version Environment.NewLine exn.Message Environment.NewLine
+                            do! download false (attempt + 1)
                 | exn when String.IsNullOrWhiteSpace !downloadUrl ->
-                    raise <| Exception(sprintf "Could not download %O %O." packageName version, exn)
-                | exn -> raise <| Exception(sprintf "Could not download %O %O from %s." packageName version !downloadUrl, exn) }
+                    raise (Exception(sprintf "Could not download %O %O." packageName version, exn))
+                | exn -> raise (Exception(sprintf "Could not download %O %O from %s." packageName version !downloadUrl, exn)) }
 
     async {
         do! download true 0
         if not isLocalOverride then
-            let! extractedUserFolder = ExtractPackageToUserFolder(targetFile.FullName, packageName, version, isCliTool)
+            let! extractedUserFolder = ExtractPackageToUserFolder(targetFile.FullName, packageName, version, kind)
             let! files = NuGetCache.CopyFromCache(configResolved, targetFile.FullName, licenseFileName, packageName, version, force, detailed)
             let finalFolder =
                 match files with
@@ -809,3 +823,7 @@ let DownloadAndExtractPackage(alternativeProjectRoot, root, isLocalOverride:bool
                 let! folder = ExtractPackage(targetFile.FullName, directory, packageName, version, detailed)
                 return targetFileName,folder
     }
+    
+
+let DownloadAndExtractPackage(alternativeProjectRoot, root, isLocalOverride:bool, config:PackagesFolderGroupConfig, source : PackageSource, caches:Cache list, groupName, packageName:PackageName, version:SemVerInfo, kind, includeVersionInPath, downloadLicense, force, detailed) =
+    downloadAndExtractPackage(alternativeProjectRoot, root, isLocalOverride, config, source , caches, groupName, packageName, version, kind, includeVersionInPath, downloadLicense, force, detailed)

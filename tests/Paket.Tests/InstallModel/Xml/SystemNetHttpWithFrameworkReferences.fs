@@ -33,7 +33,7 @@ let expected = """
       </Reference>
     </ItemGroup>
   </When>
-  <When Condition="$(TargetFrameworkIdentifier) == '.NETFramework' And ($(TargetFrameworkVersion) == 'v4.5' Or $(TargetFrameworkVersion) == 'v4.5.1' Or $(TargetFrameworkVersion) == 'v4.5.2' Or $(TargetFrameworkVersion) == 'v4.5.3' Or $(TargetFrameworkVersion) == 'v4.6' Or $(TargetFrameworkVersion) == 'v4.6.1' Or $(TargetFrameworkVersion) == 'v4.6.2' Or $(TargetFrameworkVersion) == 'v4.6.3' Or $(TargetFrameworkVersion) == 'v4.7' Or $(TargetFrameworkVersion) == 'v5.0')">
+  <When Condition="$(TargetFrameworkIdentifier) == '.NETFramework' And ($(TargetFrameworkVersion) == 'v4.5' Or $(TargetFrameworkVersion) == 'v4.5.1' Or $(TargetFrameworkVersion) == 'v4.5.2' Or $(TargetFrameworkVersion) == 'v4.5.3' Or $(TargetFrameworkVersion) == 'v4.6' Or $(TargetFrameworkVersion) == 'v4.6.1' Or $(TargetFrameworkVersion) == 'v4.6.2' Or $(TargetFrameworkVersion) == 'v4.6.3' Or $(TargetFrameworkVersion) == 'v4.7' Or $(TargetFrameworkVersion) == 'v4.7.1')">
     <ItemGroup>
       <Reference Include="System.Net.Http">
         <Paket>True</Paket>
@@ -59,7 +59,7 @@ let expected = """
 let ``should generate Xml for System.Net.Http 2.2.8``() = 
     ensureDir()
     let model =
-        InstallModel.CreateFromLibs(PackageName "System.Net.Http", SemVer.Parse "2.2.8", FrameworkRestriction.NoRestriction,
+        InstallModel.CreateFromLibs(PackageName "System.Net.Http", SemVer.Parse "2.2.8", InstallModelKind.Package, FrameworkRestriction.NoRestriction,
             [ @"..\Microsoft.Net.Http\lib\net40\System.Net.Http.dll"
               @"..\Microsoft.Net.Http\lib\net40\System.Net.Http.Extensions.dll"
               @"..\Microsoft.Net.Http\lib\net40\System.Net.Http.Primitives.dll"
@@ -72,7 +72,7 @@ let ``should generate Xml for System.Net.Http 2.2.8``() =
                { References = NuspecReferences.All
                  Version = "2.2.8"
                  OfficialName = "Microsoft.Net.Http"
-                 Dependencies = []
+                 Dependencies = lazy []
                  LicenseUrl = ""
                  IsDevelopmentDependency = false
                  FrameworkAssemblyReferences =

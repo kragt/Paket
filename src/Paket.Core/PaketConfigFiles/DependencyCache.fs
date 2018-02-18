@@ -23,7 +23,7 @@ type ReferenceType =
         | Framework info -> sprintf "Framework: '%s'" info
         | LoadScript info -> sprintf "LoadScript: '%s'" info.FullName
 
-type DependencyCache (dependencyFile:DependenciesFile, lockFile:LockFile) =
+type DependencyCache (lockFile:LockFile) =
     let loadedGroups = HashSet<GroupName>()
     let mutable nuspecCache = ConcurrentDictionary<PackageName*SemVerInfo, Nuspec>()
     let mutable installModelCache = ConcurrentDictionary<GroupName * PackageName,InstallModel>()
@@ -95,7 +95,7 @@ type DependencyCache (dependencyFile:DependenciesFile, lockFile:LockFile) =
     let getDllsWithinPackage (framework: FrameworkIdentifier) (installModel :InstallModel) =
         let dllFiles =
             installModel
-            |> InstallModel.getLegacyReferences (SinglePlatform framework)
+            |> InstallModel.getLegacyReferences (TargetProfile.SinglePlatform framework)
             |> Seq.map (fun l -> l.Path)
             |> Seq.map (fun path -> AssemblyDefinition.ReadAssembly path, FileInfo(path))
             |> dict
@@ -109,13 +109,14 @@ type DependencyCache (dependencyFile:DependenciesFile, lockFile:LockFile) =
         match tryGet group orderedGroupCache with
         | None -> []
         | Some packs -> 
-            packs |> List.iter (fun pack -> 
+            for pack in packs do
                 match tryGet (group,pack.Name) installModelCache with
                 | None -> ()
                 | Some model ->
-                    model.GetLibReferenceFiles (SinglePlatform framework) |> Seq.iter (libs.Add >> ignore)
-                    model.GetAllLegacyFrameworkReferences ()|> Seq.iter (sysLibs.Add >> ignore)
-            )
+                    for lib in model.GetLibReferenceFiles (TargetProfile.SinglePlatform framework) do
+                        libs.Add lib |> ignore
+                    for sysLib in model.GetAllLegacyFrameworkReferences() do
+                        sysLibs.Add sysLib |> ignore
 
             let assemblyFilePerAssemblyDef = 
                 libs |> Seq.map (fun (f:FileInfo) -> 
@@ -174,7 +175,6 @@ type DependencyCache (dependencyFile:DependenciesFile, lockFile:LockFile) =
 
 
     member __.LockFile = lockFile
-    member __.DependenciesFile = dependencyFile
     
     member __.InstallModels () = 
         installModelCache |> Seq.map (fun x -> x.Value) |> List.ofSeq
@@ -207,10 +207,15 @@ type DependencyCache (dependencyFile:DependenciesFile, lockFile:LockFile) =
                         let nuspec = FileInfo(Path.Combine (lockFile.RootPath,nuspecShort))
                         let nuspec = Nuspec.Load nuspec.FullName
                         nuspecCache.TryAdd((package.Name,package.Version),nuspec) |>ignore
+                        let kind =
+                            match package.Kind with
+                            | ResolvedPackageKind.Package -> InstallModelKind.Package
+                            | ResolvedPackageKind.DotnetCliTool -> InstallModelKind.DotnetCliTool
                         let model = 
                             InstallModel.CreateFromContent(
                                 package.Name, 
                                 package.Version, 
+                                kind,
                                 Paket.Requirements.FrameworkRestriction.NoRestriction, 
                                 NuGet.GetContent(folder).Force())
                         installModelCache.TryAdd((groupName,package.Name) , model) |> ignore }) 
@@ -235,9 +240,8 @@ type DependencyCache (dependencyFile:DependenciesFile, lockFile:LockFile) =
 
 
     new (dependencyFilePath:string) = 
-        let depFile = DependenciesFile.ReadFromFile dependencyFilePath 
-        let lockFile = depFile.FindLockfile() |> fun path -> path.FullName |> LockFile.LoadFrom
-        DependencyCache (depFile,lockFile)
+        let lockFile = DependenciesFile.FindLockfile dependencyFilePath |> fun path -> path.FullName |> LockFile.LoadFrom
+        DependencyCache (lockFile)
 
  
     member __.InstallModel groupName packageName = tryGet (groupName, packageName)  installModelCache

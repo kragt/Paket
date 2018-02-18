@@ -136,7 +136,7 @@ let ``fails on wrong framework given`` () =
     )
     let message = failure.ToString()
     printfn "%s" message
-    Assert.IsTrue(message.Contains "Cannot generate include scripts.")
+    Assert.IsTrue(message.Contains "Can't generate load scripts.")
     Assert.IsTrue(message.Contains "Unrecognized Framework(s)")
     Assert.IsTrue(message.Contains "foo, bar")
 
@@ -233,3 +233,14 @@ let ``issue 2156 netstandard`` () =
     paket "install" scenario |> ignore
     directPaket "generate-load-scripts" scenario |> ignore
     // note: no assert for now, I don't know what we are exactly expecting
+
+[<Test; Category("scriptgen")>]
+let ``don't touch file if contents are same`` () =
+    let scenario = "issue-2939"
+    paket "install" scenario |> ignore
+    let scriptsFolder = scriptRoot scenario
+    let newtonsoftScript = Path.Combine(scriptsFolder.FullName, "Newtonsoft.Json.fsx") |> FileInfo
+    let modificationDate = newtonsoftScript.LastWriteTimeUtc
+    directPaket "install" scenario |> ignore
+    newtonsoftScript.Refresh()
+    Assert.AreEqual(modificationDate, newtonsoftScript.LastWriteTimeUtc)
